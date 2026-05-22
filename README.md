@@ -1,91 +1,83 @@
 # ICU Trajectory RAG Assistant - Phase 1
 
-## 1. Project overview
+## 1. Project Overview
 
-This repository contains a local Python RAG layer added alongside the historical R project. Phase 1 remains a retrieval-and-generation prototype for ICU vital signs, with MIMIC-IV statistics and project documents as sources.
+This repository contains a local Python RAG (Retrieval-Augmented Generation) pipeline designed to explore ICU vital signs and clinical data. Originally relying on lexical search (TF-IDF), the system has been upgraded to a modern semantic architecture using dense embeddings, a vector database, and local LLM inference. 
 
-## 2. Phase 1 objective
+## 2. Phase 1 Objective
 
-The goal of Phase 1 is still simple: user question -> local retrieval over indexed chunks -> sourced answer. The system is intended for academic interpretation and literature-style exploration, not for clinical decision support.
+The goal of Phase 1 is to implement a functional, end-to-end RAG system: user question -> semantic retrieval over indexed chunks -> grounded generation by an LLM. 
+The system is intended for academic interpretation and literature-style exploration, not for clinical decision support.
 
 ## 3. What this phase does
 
-The pipeline now extracts small BigQuery samples for multiple routine ICU vital signs, prepares RAG-ready documents from CSV and markdown/text sources, chunks the content, builds a local TF-IDF index, retrieves the most relevant chunks, and produces a structured template-based answer with sources.
-
-The first version started with Heart Rate only to validate the pipeline end to end. The current version extends the same Phase 1 design to Respiratory Rate, Blood Pressure, MAP, Temperature, and SpO2 when a true measurement item is found.
+The pipeline now features:
+* **Multi-format Ingestion:** Extracts and chunks data from structured tables (CSV), text documents (Markdown), and unstructured documents (PDF).
+* **Smart Chunking:** Uses a sliding window approach (800 characters with 120 overlap) to preserve semantic context.
+* **Semantic Embeddings:** Uses the `bge-m3:latest` model to convert chunks into dense vectors.
+* **Vector Storage:** Persistently stores embeddings and metadata using **ChromaDB**.
+* **Semantic Retrieval:** Uses L2 distance to retrieve the most contextually relevant chunks.
+* **Grounded Generation:** Uses `qwen2.5:14b` (or similar local LLM) acting as an academic assistant to formulate a precise answer based *strictly* on the retrieved context, preventing hallucinations.
 
 ## 4. What this phase does NOT do
 
 This Phase 1 prototype does not implement:
-- MCP;
-- agents;
-- function calling;
-- tool calling;
-- multi-agent orchestration;
-- clinical diagnosis;
-- production deployment.
+- Multi-step reasoning or Agentic workflows (planned for Phase 2).
+- Function calling / Tool Calling via MCP (planned for Phase 2).
+- Production deployment or cloud orchestration.
+- Clinical diagnosis.
 
-## 5. Data sources
+## 5. Data Sources
 
-Primary sources:
-- `physionet-data.mimiciv_3_1_icu`
-- `physionet-data.mimiciv_3_1_hosp`
+The system ingests heterogeneous data sources:
+- **Processed MIMIC-IV Data (CSV):** Vital sign summaries and patient cohorts (e.g., `elderly_icu_stays.csv`).
+- **Academic/Project Documents (PDF):** Course materials or reference reports (e.g., `Rapport_Final.pdf`).
+- **Text/Markdown (MD):** Project documentation (e.g., `README.md`).
 
-Local sources:
-- `README.md`
-- markdown/text files in the project
-- files added later under `data/rag_documents/`
-- generated CSV summaries under `data/processed/`
+## 6. Prerequisites & Installation
 
-## 6. BigQuery configuration
+The project relies on a local Python environment and an active **Ollama** server for local inference.
 
-The project ID is `mimic-rag-2026-vinith`. Authentication is expected to be configured locally with Application Default Credentials.
-
-Useful commands:
-
-```bash
-gcloud config set project mimic-rag-2026-vinith
-gcloud auth application-default login
-gcloud auth application-default set-quota-project mimic-rag-2026-vinith
-bq ls physionet-data:mimiciv_3_1_icu
-```
-
-## 7. MIMIC-IV tables used
-
-Phase 1 currently focuses on:
-- `patients`
-- `icustays`
-- `chartevents`
-- `d_items`
-
-The extraction is intentionally conservative: it starts with `LIMIT`, filters `chartevents` by itemid before any time-window analysis, and excludes alarm items, care-plan items, MD note items, APACHE score items, sensor placement items, and alarm-limit items from the vital-sign summary layer.
-
-## 8. RAG pipeline
-
-1. Extract a small elderly ICU cohort from BigQuery.
-2. Extract vital-sign metadata from `d_items`.
-3. Extract limited vital-sign samples from `chartevents`.
-4. Compute age-group and time-window summaries in Python.
-5. Convert statistics and project documents into RAG documents.
-6. Chunk the documents.
-7. Build a local TF-IDF index.
-8. Retrieve chunks and generate a structured sourced answer.
-
-Retrieval now infers age group, time window, and vital sign from the question and boosts matching chunks accordingly.
-It also detects the query intent so patient-value, threshold, concept, dataset, and pipeline questions follow different retrieval and answer paths.
-If a requested vital sign has no matching statistical summary in the current index, the system returns a clear missing-vital response instead of borrowing an unrelated percentile summary.
-
-## 9. How to run
-
-Create and activate the Python environment:
-
+1. **Python Environment:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Run the pipeline:
+2. **Ollama Setup:**
+Ensure Ollama is installed and running on your machine. Pull the required models:
+
+```bash
+ollama pull bge-m3:latest
+ollama pull qwen2.5:14b
+```
+
+## 7. How to Run the Pipeline
+
+### A. New Semantic RAG Pipeline (ChromaDB & Ollama)
+
+**Step 1: Data Ingestion & Vectorization**
+Run the ingestion script to parse the documents, generate embeddings, and populate the ChromaDB vector database.
+
+```bash
+python src/ingest.py
+```
+
+*Expected output: Confirmation of the total number of chunks successfully indexed in ChromaDB.*
+
+**Step 2: Retrieval & Generation (RAG)**
+Run the RAG script to ask a question. The system will vectorize the query, retrieve the top chunks, and generate a grounded response.
+
+```bash
+python src/rag.py
+```
+
+### B. Legacy Pipeline (TF-IDF & Streamlit App)
+
+If you need to re-extract data from BigQuery or run the original TF-IDF Streamlit interface:
+
+Run the legacy extraction and indexing pipeline:
 
 ```bash
 python -m src.bigquery_extract_mimic
@@ -94,25 +86,19 @@ python -m src.chunk_documents
 python -m src.build_rag_index
 ```
 
-Run the local app:
+Run the local Streamlit app:
 
 ```bash
 streamlit run app.py
 ```
 
-## 10. Example questions
+## 8. Example Questions
 
-- For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?
-- For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this low?
-- For a patient aged 86 with respiratory rate 24 in the first 12h ICU stay, is this elevated?
-- How should SpO2 below 92% be interpreted in elderly ICU patients?
-- What is the difference between standard thresholds and MIMIC-IV percentile-based summaries?
-- Why are alarm items excluded from the vital sign pipeline?
+* "Quels sont les seuils adaptatifs pour la fréquence cardiaque des patients âgés ?"
+* "Quelle est la différence entre les percentiles du groupe 65-74 ans et ceux du groupe 85 ans et plus ?"
+* "For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?"
+* "What is the difference between standard thresholds and MIMIC-IV percentile-based summaries?"
 
-## 11. Limitations
+## 9. Next Step: Phase 2 (Agents & MCP)
 
-The current prototype is local, lightweight, and text-driven. It does not model causal inference, it does not represent full clinical context, and it should not be used for direct clinical decisions. If BigQuery access fails, the pipeline stops cleanly unless an explicit demo fallback is enabled in code.
-
-## 12. Next step: Phase 2 Agent with tools
-
-Phase 2 will be a separate step and may add tool-using agents for richer analysis. That phase is intentionally out of scope here.
+Phase 2 will transition this "passive" RAG into an active Agentic system. The LLM will use Function Calling to autonomously select tools (including this vector search, external APIs, or arithmetic calculators) via the Model Context Protocol (MCP) to solve complex, multi-step queries.
