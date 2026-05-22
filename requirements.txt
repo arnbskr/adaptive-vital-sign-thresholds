@@ -7,3 +7,6 @@ joblib
 streamlit
 pyarrow
 python-dotenv
+chromadb
+pypdf
+openai
