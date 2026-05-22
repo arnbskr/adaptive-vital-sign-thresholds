@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from src.config import EVALUATION_DIR
+from src.evaluate_retrieval import run_retrieval_evaluation
 from src.semantic_rag import (
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -168,10 +170,18 @@ if ask_clicked:
         sources_df = pd.DataFrame(
             [
                 {
+                    "rank": item.get("rank"),
                     "source_file": item.get("source_file"),
                     "source_type": item.get("source_type"),
+                    "vital_sign": item.get("vital_sign"),
+                    "age_group": item.get("age_group"),
+                    "time_window": item.get("time_window"),
+                    "semantic_score": round(float(item.get("semantic_score", 0.0)), 4),
+                    "metadata_bonus": round(float(item.get("metadata_bonus", 0.0)), 4),
+                    "mismatch_penalty": round(float(item.get("mismatch_penalty", 0.0)), 4),
+                    "final_score": round(float(item.get("final_score", item.get("semantic_score", 0.0))), 4),
                     "title": item.get("title"),
-                    "score": round(float(item.get("similarity_score", 0.0)), 4),
+                    "chunk_preview": item.get("chunk_preview"),
                 }
                 for item in retrieved
                 if is_allowed_source_file(str(item.get("source_file", "")))
@@ -183,19 +193,29 @@ if ask_clicked:
             st.info("No sources available for the current query.")
         st.markdown('</div>', unsafe_allow_html=True)
 
+    retrieval_info = retrieved[0]
+    quality_cols = st.columns(4)
+    quality_cols[0].metric("Retrieval latency", f"{float(retrieval_info.get('retrieval_latency_ms', 0.0)):.1f} ms")
+    quality_cols[1].metric("Candidates retrieved", int(retrieval_info.get("candidate_count_requested", len(retrieved))))
+    quality_cols[2].metric("Question intent", str(retrieval_info.get("question_intent", "general_question")))
+    quality_cols[3].metric("Exact metadata match", "yes" if retrieval_info.get("is_exact_match") else "no")
+
     st.markdown("### Retrieved chunks")
     if retrieved:
         chunks_view = pd.DataFrame(
             [
                 {
                     "rank": item.get("rank"),
+                    "semantic_rank": item.get("semantic_rank"),
                     "source_file": item.get("source_file"),
                     "source_type": item.get("source_type"),
                     "vital_sign": item.get("vital_sign"),
                     "age_group": item.get("age_group"),
                     "time_window": item.get("time_window"),
-                    "distance": round(float(item.get("distance", 0.0)), 4),
-                    "similarity_score": round(float(item.get("similarity_score", 0.0)), 4),
+                    "semantic_score": round(float(item.get("semantic_score", 0.0)), 4),
+                    "metadata_bonus": round(float(item.get("metadata_bonus", 0.0)), 4),
+                    "mismatch_penalty": round(float(item.get("mismatch_penalty", 0.0)), 4),
+                    "final_score": round(float(item.get("final_score", 0.0)), 4),
                     "title": item.get("title"),
                     "chunk_preview": item.get("chunk_preview"),
                 }
@@ -231,8 +251,43 @@ else:
             """
             <div class="card">
             <div class="section-label">How to read the output</div>
-            <p class="small-muted">The left panel gives the grounded answer from qwen2.5:14b; the right panel lists the retrieved project sources; the chunk table shows metadata, distance, and preview text.</p>
+            <p class="small-muted">The left panel gives the grounded answer from qwen2.5:14b; the right panel lists the retrieved project sources; the chunk table shows metadata, semantic score, metadata bonuses, and the reranked final score.</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+st.markdown("### Retrieval evaluation")
+run_eval = st.button("Run / refresh retrieval evaluation")
+if run_eval:
+    with st.spinner("Running the strategy comparison benchmark..."):
+        csv_path, md_path = run_retrieval_evaluation()
+    st.success(f"Saved evaluation results to {csv_path} and {md_path}")
+
+evaluation_summary_path = EVALUATION_DIR / "retrieval_summary.md"
+evaluation_results_path = EVALUATION_DIR / "retrieval_evaluation.csv"
+if evaluation_summary_path.exists():
+    st.markdown(evaluation_summary_path.read_text(encoding="utf-8"))
+    if evaluation_results_path.exists():
+        evaluation_df = pd.read_csv(evaluation_results_path)
+        st.dataframe(
+            evaluation_df[
+                [
+                    "strategy",
+                    "question",
+                    "question_type",
+                    "top1_source_type_match",
+                    "top1_vital_sign_match",
+                    "top1_age_group_match",
+                    "top1_time_window_match",
+                    "exact_metadata_match_at_1",
+                    "exact_metadata_match_at_k",
+                    "retrieval_latency_ms",
+                    "number_of_candidates_retrieved",
+                ]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+else:
+    st.caption("Run the evaluation once to generate the comparison table and summary files.")

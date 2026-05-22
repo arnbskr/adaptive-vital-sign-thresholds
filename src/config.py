@@ -11,6 +11,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
+EVALUATION_DIR = DATA_DIR / "evaluation"
 RAG_DOCUMENTS_DIR = DATA_DIR / "rag_documents"
 RAG_CHUNKS_DIR = DATA_DIR / "rag_chunks"
 RAG_INDEX_DIR = DATA_DIR / "rag_index"
@@ -23,6 +24,7 @@ def ensure_data_directories() -> None:
         DATA_DIR,
         RAW_DIR,
         PROCESSED_DIR,
+        EVALUATION_DIR,
         RAG_DOCUMENTS_DIR,
         RAG_CHUNKS_DIR,
         RAG_INDEX_DIR,

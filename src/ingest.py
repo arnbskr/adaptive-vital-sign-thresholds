@@ -238,6 +238,7 @@ def _document_records_for_csv(path: Path) -> list[tuple[str, dict[str, Any]]]:
     records: list[tuple[str, dict[str, Any]]] = []
     source_file = relative_source_path(path)
 
+    # Keep table rows aligned with their statistics: one CSV row becomes one retrievable document.
     for _, row in dataframe.iterrows():
         if path.name == "vital_signs_elderly_icu_summary.csv":
             text, metadata = _summary_row_to_document(row, source_file)
