@@ -212,6 +212,15 @@ def infer_vital_sign_from_query(query: str) -> tuple[str | None, bool]:
     return None, False
 
 
+def infer_temperature_itemid_from_query(query: str) -> int | None:
+    lowered = query.lower()
+    if re.search(r"(?:°\s*c|\bcelsius\b|\bcentigrade\b)", lowered):
+        return 223762
+    if re.search(r"(?:°\s*f|\bfahrenheit\b)", lowered):
+        return 223761
+    return None
+
+
 def query_mentions_vital_sign(query: str, vital_sign: str) -> bool:
     return _contains_any(query.lower(), VITAL_KEYWORDS.get(vital_sign, []))
 

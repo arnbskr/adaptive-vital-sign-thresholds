@@ -49,7 +49,10 @@ def extract_and_chunk_text(txt_path, chunk_size=800, overlap=120):
 fichiers_a_ingerer = [
     "Rapport_Final.pdf", 
     "data/processed/elderly_icu_stays.csv",
-    "README.md"
+    "data/processed/vital_signs_elderly_icu_summary.csv",
+    "README.md",
+    "2024.knowllm-1.6.pdf",
+    "s41597-022-01899-x.pdf"
 ]
 
 total_chunks_ajoutes = 0

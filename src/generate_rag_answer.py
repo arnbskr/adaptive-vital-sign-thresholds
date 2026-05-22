@@ -19,6 +19,7 @@ from .rag_utils import (
     infer_age_group_from_query,
     infer_direction_from_query,
     infer_time_window_from_query,
+    infer_temperature_itemid_from_query,
     infer_vital_sign_from_query,
 )
 
@@ -33,6 +34,15 @@ def _format_chunk_reference(chunk: dict[str, Any]) -> str:
     title = chunk.get("title") or chunk.get("source_file") or chunk.get("doc_id")
     score = float(chunk.get("final_score", 0.0))
     return f"- {title} ({chunk.get('source_type')}, score={score:.3f})"
+
+
+def _normalize_itemid(value: object) -> int | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _sources_used(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -54,13 +64,27 @@ def _sources_used(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sources
 
 
-def _first_matching_chunk(retrieved_chunks: list[dict[str, Any]], vital_sign: str | None) -> dict[str, Any] | None:
+def _first_matching_chunk(
+    retrieved_chunks: list[dict[str, Any]],
+    vital_sign: str | None,
+    preferred_itemid: int | None = None,
+) -> dict[str, Any] | None:
     matching = [
         chunk
         for chunk in retrieved_chunks
         if str(chunk.get("source_type", "")).lower() == "mimic_stats"
         and (not vital_sign or str(chunk.get("vital_sign", "")).lower() == vital_sign.lower())
+        and (preferred_itemid is None or _normalize_itemid(chunk.get("itemid")) == preferred_itemid)
     ]
+    if matching:
+        return matching[0]
+    if preferred_itemid is not None:
+        matching = [
+            chunk
+            for chunk in retrieved_chunks
+            if str(chunk.get("source_type", "")).lower() == "mimic_stats"
+            and (not vital_sign or str(chunk.get("vital_sign", "")).lower() == vital_sign.lower())
+        ]
     return matching[0] if matching else None
 
 
@@ -262,7 +286,8 @@ def _patient_value_answer(query: str, retrieved_chunks: list[dict[str, Any]], in
     context_lines, context = _patient_context_lines(query, None, intent)
     numeric_value = extract_vital_value_from_query(query, context["vital_sign"])
     context_lines, context = _patient_context_lines(query, numeric_value, intent)
-    summary_chunk = _first_matching_chunk(retrieved_chunks, context["vital_sign"])
+    preferred_itemid = infer_temperature_itemid_from_query(query) if context["vital_sign"] == "Temperature" else None
+    summary_chunk = _first_matching_chunk(retrieved_chunks, context["vital_sign"], preferred_itemid)
     details = _extract_summary_details(summary_chunk)
 
     if context["vital_sign"] and summary_chunk is None:
@@ -308,7 +333,8 @@ def _patient_value_answer(query: str, retrieved_chunks: list[dict[str, Any]], in
 def _vital_threshold_answer(query: str, retrieved_chunks: list[dict[str, Any]]) -> str:
     _, context = _patient_context_lines(query, extract_vital_value_from_query(query, infer_vital_sign_from_query(query)[0]), INTENT_VITAL_THRESHOLD)
     context_lines, context = _patient_context_lines(query, extract_vital_value_from_query(query, infer_vital_sign_from_query(query)[0]), INTENT_VITAL_THRESHOLD)
-    summary_chunk = _first_matching_chunk(retrieved_chunks, context["vital_sign"])
+    preferred_itemid = infer_temperature_itemid_from_query(query) if context["vital_sign"] == "Temperature" else None
+    summary_chunk = _first_matching_chunk(retrieved_chunks, context["vital_sign"], preferred_itemid)
     details = _extract_summary_details(summary_chunk)
 
     if context["vital_sign"] and summary_chunk is None:
@@ -440,7 +466,8 @@ def _missing_vital_answer(query: str, retrieved_chunks: list[dict[str, Any]]) ->
 def _template_answer(query: str, retrieved_chunks: list[dict[str, Any]]) -> str:
     intent = detect_query_intent(query)
     inferred_vital_sign, _ = infer_vital_sign_from_query(query)
-    matching_stat = _first_matching_chunk(retrieved_chunks, inferred_vital_sign)
+    preferred_itemid = infer_temperature_itemid_from_query(query) if inferred_vital_sign == "Temperature" else None
+    matching_stat = _first_matching_chunk(retrieved_chunks, inferred_vital_sign, preferred_itemid)
     effective_intent = intent
     if intent in {INTENT_PATIENT_VALUE, INTENT_VITAL_THRESHOLD} and inferred_vital_sign and matching_stat is None:
         effective_intent = "unsupported_or_missing_vital_question"
@@ -486,7 +513,11 @@ def generate_rag_answer(query: str, retrieved_chunks: list[dict[str, Any]], use_
         if (
             detect_query_intent(query) in {INTENT_PATIENT_VALUE, INTENT_VITAL_THRESHOLD}
             and infer_vital_sign_from_query(query)[0]
-            and _first_matching_chunk(retrieved_chunks, infer_vital_sign_from_query(query)[0]) is None
+            and _first_matching_chunk(
+                retrieved_chunks,
+                infer_vital_sign_from_query(query)[0],
+                infer_temperature_itemid_from_query(query) if infer_vital_sign_from_query(query)[0] == "Temperature" else None,
+            ) is None
         )
         else detect_query_intent(query),
         "inferred_age_group": infer_age_group_from_query(query)[0],

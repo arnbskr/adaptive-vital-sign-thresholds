@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 def _format_number(value: object) -> str:
     if value is None or pd.isna(value):
-        return "unknown"
+        return "null"
     if float(value).is_integer():
         return str(int(float(value)))
     return f"{float(value):.1f}"
@@ -43,35 +43,48 @@ def _load_summary_table() -> pd.DataFrame:
 
 
 def _summary_row_to_document(row: pd.Series, doc_id: str) -> dict[str, object]:
-    mean_value = float(row.get("mean", float("nan")))
-    median_value = float(row.get("median", float("nan")))
-    p75_value = float(row.get("p75", float("nan")))
-    p90_value = float(row.get("p90", float("nan")))
+    vital_sign = str(row.get("vital_sign", "Unknown"))
+    age_group = str(row.get("age_group", "Unknown"))
+    time_window = str(row.get("time_window", "Unknown"))
     itemid = _format_number(row.get("itemid", ""))
     label = str(row.get("label", row.get("vital_sign", "Unknown")))
     unitname = str(row.get("unitname", ""))
-    age_group = str(row.get("age_group", "Unknown"))
-    time_window = str(row.get("time_window", "Unknown"))
+    count = _format_number(row.get("count", ""))
+    mean_value = _format_number(row.get("mean", ""))
+    median_value = _format_number(row.get("median", ""))
+    p5_value = _format_number(row.get("p5", ""))
+    p25_value = _format_number(row.get("p25", ""))
+    p50_value = _format_number(row.get("p50", ""))
+    p75_value = _format_number(row.get("p75", ""))
+    p90_value = _format_number(row.get("p90", ""))
     standard_low = _format_number(row.get("standard_low", ""))
     standard_high = _format_number(row.get("standard_high", ""))
-    vital_sign = str(row.get("vital_sign", "Unknown"))
+    percent_below_standard_low = _format_number(row.get("percent_below_standard_low", ""))
+    percent_above_standard_high = _format_number(row.get("percent_above_standard_high", ""))
 
-    text = (
-        f"Population: ICU patients aged {age_group}. "
-        f"Source type: MIMIC-IV statistical summary. "
-        f"Vital sign: {vital_sign}. "
-        f"Item ID: {itemid}. "
-        f"Measurement label: {label}. "
-        f"Time window: {time_window.replace('_', ' ')} after ICU admission. "
-        f"Unit: {unitname}. "
-        f"Mean: {mean_value:.1f}. "
-        f"Median: {median_value:.1f}. "
-        f"P75: {p75_value:.1f}. "
-        f"P90: {p90_value:.1f}. "
-        f"Standard low threshold: {standard_low}. "
-        f"Standard high threshold: {standard_high}. "
-        f"Observation: This summary describes the distribution of {vital_sign} in elderly ICU patients for this age group and time window. "
-        f"Standard thresholds should be interpreted cautiously in the ICU context and compared with the observed MIMIC-IV distribution."
+    text = "\n".join(
+        [
+            f"Population: ICU patients aged {age_group}.",
+            "Source type: MIMIC-IV statistical summary.",
+            f"Vital sign: {vital_sign}.",
+            f"Item ID: {itemid}.",
+            f"Measurement label: {label}.",
+            f"Unit: {unitname}.",
+            f"Time window: {time_window}.",
+            f"Count: {count}.",
+            f"Mean: {mean_value}.",
+            f"Median: {median_value}.",
+            f"P5: {p5_value}.",
+            f"P25: {p25_value}.",
+            f"P50: {p50_value}.",
+            f"P75: {p75_value}.",
+            f"P90: {p90_value}.",
+            f"Standard low threshold: {standard_low}.",
+            f"Standard high threshold: {standard_high}.",
+            f"Percent below standard low: {percent_below_standard_low}.",
+            f"Percent above standard high: {percent_above_standard_high}.",
+            "These statistics are descriptive summaries from MIMIC-IV ICU data. They are not clinical decision rules and must be interpreted as academic context only.",
+        ]
     )
 
     return {

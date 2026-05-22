@@ -21,6 +21,7 @@ from .rag_utils import (
     infer_age_group_from_query,
     infer_direction_from_query,
     infer_time_window_from_query,
+    infer_temperature_itemid_from_query,
     infer_vital_sign_from_query,
     query_mentions_vital_sign,
 )
@@ -85,6 +86,15 @@ def _normalize_cell(value: object) -> str:
     return str(value).strip().lower()
 
 
+def _normalize_itemid(value: object) -> int | None:
+    if pd.isna(value):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _vital_sign_matches(candidate: str, inferred: str | None) -> bool:
     if not inferred:
         return False
@@ -147,6 +157,7 @@ def retrieve_chunks(
     inferred_age_group, has_precise_age = infer_age_group_from_query(query)
     inferred_time_window, has_precise_time_window = infer_time_window_from_query(query)
     inferred_vital_sign, has_precise_vital_sign = infer_vital_sign_from_query(query)
+    inferred_temperature_itemid = infer_temperature_itemid_from_query(query)
     inferred_age = infer_age_from_query(query)
     inferred_direction = infer_direction_from_query(query)
     threshold_condition = detect_threshold_condition(query)
@@ -220,6 +231,7 @@ def retrieve_chunks(
         chunk_age_group = _normalize_cell(row.get("age_group"))
         chunk_time_window = _normalize_cell(row.get("time_window"))
         chunk_vital_sign = _normalize_cell(row.get("vital_sign"))
+        chunk_itemid = _normalize_itemid(row.get("itemid"))
         source_type = _normalize_cell(row.get("source_type"))
 
         if inferred_age_group:
@@ -239,6 +251,12 @@ def retrieve_chunks(
                 metadata_boost += 0.35
             elif has_precise_vital_sign and chunk_vital_sign:
                 mismatch_penalty += 0.35
+
+        if inferred_temperature_itemid is not None and chunk_vital_sign == "temperature":
+            if chunk_itemid == inferred_temperature_itemid:
+                metadata_boost += 0.35
+            elif has_precise_vital_sign:
+                mismatch_penalty += 0.20
 
         if inferred_age is not None and inferred_age_group:
             metadata_boost += 0.02

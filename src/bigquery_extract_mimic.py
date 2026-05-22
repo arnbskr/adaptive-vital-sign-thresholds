@@ -15,69 +15,33 @@ LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ELDERLY_LIMIT = 1000
-EVENT_LIMIT = 100000
+EVENT_LIMIT = 10000
 
-VITAL_SPECS: list[dict[str, Any]] = [
-    {
-        "vital_sign": "Heart Rate",
-        "itemids": [220045],
-        "standard_low": 60,
-        "standard_high": 100,
-        "unitname_hint": "bpm",
-        "legacy_output": True,
-    },
-    {
-        "vital_sign": "Respiratory Rate",
-        "itemids": [220210],
-        "standard_low": 12,
-        "standard_high": 20,
-        "unitname_hint": "breaths/min",
-        "legacy_output": False,
-    },
-    {
-        "vital_sign": "Systolic Blood Pressure",
-        "itemids": [220050, 220179],
-        "standard_low": 90,
-        "standard_high": 140,
-        "unitname_hint": "mmHg",
-        "legacy_output": False,
-    },
-    {
-        "vital_sign": "Diastolic Blood Pressure",
-        "itemids": [220051, 220180],
-        "standard_low": 60,
-        "standard_high": 90,
-        "unitname_hint": "mmHg",
-        "legacy_output": False,
-    },
-    {
-        "vital_sign": "MAP",
-        "itemids": [220052, 220181],
-        "standard_low": 65,
-        "standard_high": None,
-        "unitname_hint": "mmHg",
-        "legacy_output": False,
-    },
-    {
-        "vital_sign": "Temperature Celsius",
-        "itemids": [223762],
-        "standard_low": 36.0,
-        "standard_high": 38.0,
-        "unitname_hint": "°C",
-        "legacy_output": False,
-    },
-    {
-        "vital_sign": "Temperature Fahrenheit",
-        "itemids": [223761],
-        "standard_low": 96.8,
-        "standard_high": 100.4,
-        "unitname_hint": "°F",
-        "legacy_output": False,
-    },
+VITAL_GROUP_SPECS: list[dict[str, Any]] = [
+    {"vital_sign": "Heart Rate", "itemids": [220045]},
+    {"vital_sign": "Respiratory Rate", "itemids": [220210]},
+    {"vital_sign": "MAP", "itemids": [220052, 220181]},
+    {"vital_sign": "Systolic Blood Pressure", "itemids": [220050, 220179]},
+    {"vital_sign": "Diastolic Blood Pressure", "itemids": [220051, 220180]},
+    {"vital_sign": "Temperature", "itemids": [223762, 223761]},
+    {"vital_sign": "SpO2", "itemids": [220277]},
 ]
 
-SUPPORTED_SP02_LABELS = ["spo2", "oxygen saturation", "o2 saturation", "saturation"]
-UNWANTED_SP02_TERMS = ["alarm", "limit", "sensor", "placement", "waveform", "care plan", "apache", "note"]
+ITEM_SPECS: dict[int, dict[str, Any]] = {
+    220045: {"vital_sign": "Heart Rate", "standard_low": 60.0, "standard_high": 100.0, "safe_low": 20.0, "safe_high": 250.0},
+    220210: {"vital_sign": "Respiratory Rate", "standard_low": 12.0, "standard_high": 20.0, "safe_low": 1.0, "safe_high": 80.0},
+    220052: {"vital_sign": "MAP", "standard_low": 65.0, "standard_high": None, "safe_low": 20.0, "safe_high": 200.0},
+    220181: {"vital_sign": "MAP", "standard_low": 65.0, "standard_high": None, "safe_low": 20.0, "safe_high": 200.0},
+    220050: {"vital_sign": "Systolic Blood Pressure", "standard_low": 90.0, "standard_high": 140.0, "safe_low": 40.0, "safe_high": 300.0},
+    220179: {"vital_sign": "Systolic Blood Pressure", "standard_low": 90.0, "standard_high": 140.0, "safe_low": 40.0, "safe_high": 300.0},
+    220051: {"vital_sign": "Diastolic Blood Pressure", "standard_low": 60.0, "standard_high": 90.0, "safe_low": 20.0, "safe_high": 200.0},
+    220180: {"vital_sign": "Diastolic Blood Pressure", "standard_low": 60.0, "standard_high": 90.0, "safe_low": 20.0, "safe_high": 200.0},
+    223762: {"vital_sign": "Temperature", "standard_low": 36.0, "standard_high": 38.0, "safe_low": 25.0, "safe_high": 45.0},
+    223761: {"vital_sign": "Temperature", "standard_low": 96.8, "standard_high": 100.4, "safe_low": 77.0, "safe_high": 113.0},
+    220277: {"vital_sign": "SpO2", "standard_low": 92.0, "standard_high": None, "safe_low": 0.0, "safe_high": 100.0, "strict_safe_low": True},
+}
+
+ALL_VITAL_ITEMIDS = sorted(ITEM_SPECS)
 
 
 def build_client() -> bigquery.Client:
@@ -170,6 +134,7 @@ def extract_elderly_icu_stays(client: bigquery.Client) -> pd.DataFrame:
 
 
 def extract_icu_vital_items(client: bigquery.Client) -> pd.DataFrame:
+    itemid_list = ", ".join(str(int(itemid)) for itemid in ALL_VITAL_ITEMIDS)
     query = f"""
     SELECT
       itemid,
@@ -178,55 +143,31 @@ def extract_icu_vital_items(client: bigquery.Client) -> pd.DataFrame:
       category,
       unitname
     FROM `{ICU_DATASET}.d_items`
-    WHERE LOWER(label) LIKE '%heart rate%'
-       OR LOWER(label) LIKE '%spo2%'
-       OR LOWER(label) LIKE '%o2 saturation%'
-       OR LOWER(label) LIKE '%oxygen saturation%'
-       OR LOWER(label) LIKE '%saturation%'
-       OR LOWER(label) LIKE '%respiratory%'
-       OR LOWER(label) LIKE '%blood pressure%'
-       OR LOWER(label) LIKE '%temperature%'
-       OR LOWER(label) LIKE '%map%'
-    ORDER BY label
+    WHERE itemid IN ({itemid_list})
+    ORDER BY itemid
     """
     return client.query(query).to_dataframe()
 
 
-def resolve_spo2_items(client: bigquery.Client) -> pd.DataFrame:
-    query = f"""
-    SELECT
-      itemid,
-      label,
-      abbreviation,
-      category,
-      unitname
-    FROM `{ICU_DATASET}.d_items`
-    WHERE LOWER(label) LIKE '%spo2%'
-       OR LOWER(label) LIKE '%o2 saturation%'
-       OR LOWER(label) LIKE '%oxygen saturation%'
-       OR LOWER(label) LIKE '%saturation%'
-    ORDER BY label
-    """
-    candidates = client.query(query).to_dataframe()
-    if candidates.empty:
-        return candidates
-
-    label_series = candidates["label"].astype(str).str.lower()
-    mask = pd.Series(True, index=candidates.index)
-    for term in UNWANTED_SP02_TERMS:
-        mask &= ~label_series.str.contains(term, na=False)
-    filtered = candidates[mask].copy()
-    if filtered.empty:
-        return candidates.iloc[0:0].copy()
-
-    preferred = filtered[
-        filtered["label"].astype(str).str.contains("oxygen saturation|spo2|saturation", case=False, regex=True, na=False)
-    ].copy()
-    return preferred if not preferred.empty else filtered
+def _item_spec(itemid: int | float | None) -> dict[str, Any] | None:
+    if itemid is None or pd.isna(itemid):
+        return None
+    return ITEM_SPECS.get(int(itemid))
 
 
-def _query_vital_rows(client: bigquery.Client, cohort_table: str, itemids: list[int], limit: int = EVENT_LIMIT) -> pd.DataFrame:
+def _safe_filter_clause(itemid: int) -> str:
+    spec = _item_spec(itemid)
+    if spec is None:
+        raise KeyError(f"No safe filter specification found for itemid {itemid}")
+    lower_op = ">" if spec.get("strict_safe_low") else ">="
+    lower_bound = float(spec["safe_low"])
+    upper_bound = float(spec["safe_high"])
+    return f"(c.itemid = {int(itemid)} AND c.valuenum {lower_op} {lower_bound} AND c.valuenum <= {upper_bound})"
+
+
+def _query_vital_rows(client: bigquery.Client, itemids: list[int], limit: int = EVENT_LIMIT) -> pd.DataFrame:
     itemid_list = ", ".join(str(int(itemid)) for itemid in sorted(set(itemids)))
+    safe_clause = " OR ".join(_safe_filter_clause(itemid) for itemid in sorted(set(itemids)))
     query = f"""
     WITH elderly_icu AS (
       SELECT
@@ -234,8 +175,7 @@ def _query_vital_rows(client: bigquery.Client, cohort_table: str, itemids: list[
         p.anchor_age,
         i.hadm_id,
         i.stay_id,
-        i.intime,
-        i.outtime
+        i.intime
       FROM `{HOSP_DATASET}.patients` p
       JOIN `{ICU_DATASET}.icustays` i
         ON p.subject_id = i.subject_id
@@ -250,90 +190,76 @@ def _query_vital_rows(client: bigquery.Client, cohort_table: str, itemids: list[
       e.intime,
       c.charttime,
       c.itemid,
-      c.valuenum AS value
+      c.valuenum AS value,
+      d.label,
+      d.unitname
     FROM elderly_icu e
     JOIN `{ICU_DATASET}.chartevents` c
       ON e.stay_id = c.stay_id
+    LEFT JOIN `{ICU_DATASET}.d_items` d
+      ON c.itemid = d.itemid
     WHERE c.itemid IN ({itemid_list})
       AND c.valuenum IS NOT NULL
       AND c.charttime >= e.intime
       AND c.charttime < TIMESTAMP_ADD(e.intime, INTERVAL 24 HOUR)
+            AND ({safe_clause})
     LIMIT {limit}
     """
-    return client.query(query).to_dataframe()
-
-
-def _fetch_item_metadata(client: bigquery.Client, itemids: list[int]) -> pd.DataFrame:
-    if not itemids:
-        return pd.DataFrame(columns=["itemid", "label", "abbreviation", "category", "unitname"])
-    itemid_list = ", ".join(str(int(itemid)) for itemid in sorted(set(itemids)))
-    query = f"""
-    SELECT
-      itemid,
-      label,
-      abbreviation,
-      category,
-      unitname
-    FROM `{ICU_DATASET}.d_items`
-    WHERE itemid IN ({itemid_list})
-    """
-    return client.query(query).to_dataframe()
+    rows = client.query(query).to_dataframe()
+    if rows.empty:
+        return rows
+    rows = rows[pd.notna(rows["itemid"])].copy()
+    rows["itemid"] = rows["itemid"].astype(int)
+    return rows
 
 
 def extract_vital_sign_sample(client: bigquery.Client) -> tuple[pd.DataFrame, pd.DataFrame]:
     sample_frames: list[pd.DataFrame] = []
-    metadata_frames: list[pd.DataFrame] = []
 
-    spo2_items = resolve_spo2_items(client)
-    if not spo2_items.empty:
-        spo2_itemids = spo2_items["itemid"].dropna().astype(int).tolist()
-    else:
-        spo2_itemids = []
-
-    for spec in VITAL_SPECS:
-        itemids = list(spec["itemids"])
-        if spec["vital_sign"] == "SpO2":
-            itemids = spo2_itemids
-        if not itemids:
-            LOGGER.warning("No itemids found for %s; skipping.", spec["vital_sign"])
+    for itemid in ALL_VITAL_ITEMIDS:
+        spec = _item_spec(itemid)
+        if spec is None:
             continue
 
-        rows = _query_vital_rows(client, ICU_DATASET, itemids, limit=EVENT_LIMIT)
+        vital_sign = str(spec["vital_sign"])
+        rows = _query_vital_rows(client, [itemid], limit=EVENT_LIMIT)
         if rows.empty:
-            LOGGER.warning("No event rows found for %s; skipping.", spec["vital_sign"])
+            LOGGER.warning("No event rows found for %s; skipping.", vital_sign)
             continue
 
-        metadata = _fetch_item_metadata(client, rows["itemid"].dropna().astype(int).tolist())
-        metadata_frames.append(metadata.assign(vital_sign=spec["vital_sign"]))
-        rows = rows.merge(metadata, on="itemid", how="left", suffixes=("", "_meta"))
-        rows["vital_sign"] = spec["vital_sign"]
-        rows["standard_low"] = spec["standard_low"]
-        rows["standard_high"] = spec["standard_high"]
-        rows["label"] = rows["label"].fillna(spec["vital_sign"])
-        rows["unitname"] = rows["unitname"].fillna(spec["unitname_hint"])
+        rows["label"] = rows["label"].fillna(vital_sign)
+        rows["unitname"] = rows["unitname"].fillna("")
+        rows["vital_sign"] = vital_sign
+        rows["standard_low"] = float(spec["standard_low"]) if spec.get("standard_low") is not None else None
+        rows["standard_high"] = float(spec["standard_high"]) if spec.get("standard_high") is not None else None
+
         rows["age_group"] = rows["anchor_age"].apply(age_group_from_age)
         rows["hours_since_icu_admission"] = (
             pd.to_datetime(rows["charttime"], errors="coerce") - pd.to_datetime(rows["intime"], errors="coerce")
         ).dt.total_seconds() / 3600.0
-        rows["time_window"] = rows["hours_since_icu_admission"].apply(lambda value: time_window_from_hours(value) if pd.notna(value) else None)
-        rows = rows[[
-            "subject_id",
-            "hadm_id",
-            "stay_id",
-            "anchor_age",
-            "age_group",
-            "intime",
-            "charttime",
-            "hours_since_icu_admission",
-            "time_window",
-            "vital_sign",
-            "itemid",
-            "label",
-            "unitname",
-            "value",
-            "standard_low",
-            "standard_high",
-        ]].copy()
+        rows["time_window"] = rows["hours_since_icu_admission"].apply(
+            lambda value: time_window_from_hours(value) if pd.notna(value) else None
+        )
+        rows = rows[
+            [
+                "subject_id",
+                "hadm_id",
+                "stay_id",
+                "anchor_age",
+                "age_group",
+                "intime",
+                "charttime",
+                "hours_since_icu_admission",
+                "time_window",
+                "vital_sign",
+                "itemid",
+                "label",
+                "unitname",
+                "value",
+                "standard_low",
+                "standard_high",
+            ]
+        ].copy()
         sample_frames.append(rows)
 
     if sample_frames:
@@ -360,7 +286,7 @@ def extract_vital_sign_sample(client: bigquery.Client) -> tuple[pd.DataFrame, pd
             ]
         )
 
-    return sample_df, pd.concat(metadata_frames, ignore_index=True) if metadata_frames else pd.DataFrame()
+    return sample_df, extract_icu_vital_items(client)
 
 
 def build_vital_signs_summary(sample_df: pd.DataFrame) -> pd.DataFrame:
@@ -384,26 +310,28 @@ def build_vital_signs_summary(sample_df: pd.DataFrame) -> pd.DataFrame:
                 "p50",
                 "p75",
                 "p90",
-                "percent_above_standard_high",
-                "percent_below_standard_low",
                 "standard_low",
                 "standard_high",
+                "percent_below_standard_low",
+                "percent_above_standard_high",
                 "is_demo_data",
             ]
         )
 
     summary_rows: list[dict[str, Any]] = []
-    group_cols = ["vital_sign", "itemid", "label", "unitname", "age_group", "time_window", "standard_low", "standard_high"]
+    group_cols = ["vital_sign", "itemid", "label", "unitname", "age_group", "time_window"]
     for keys, group in sample_df.groupby(group_cols, dropna=False):
         values = pd.to_numeric(group["value"], errors="coerce").dropna()
         if values.empty:
             continue
-        vital_sign, itemid, label, unitname, age_group, time_window, standard_low, standard_high = keys
+        vital_sign, itemid, label, unitname, age_group, time_window = keys
+        standard_low = group["standard_low"].dropna().iloc[0] if group["standard_low"].notna().any() else None
+        standard_high = group["standard_high"].dropna().iloc[0] if group["standard_high"].notna().any() else None
         percent_above = None
         percent_below = None
-        if pd.notna(standard_high):
+        if standard_high is not None:
             percent_above = float((values > float(standard_high)).mean() * 100.0)
-        if pd.notna(standard_low):
+        if standard_low is not None:
             percent_below = float((values < float(standard_low)).mean() * 100.0)
 
         summary_rows.append(
@@ -425,10 +353,10 @@ def build_vital_signs_summary(sample_df: pd.DataFrame) -> pd.DataFrame:
                 "p50": float(values.quantile(0.50)),
                 "p75": float(values.quantile(0.75)),
                 "p90": float(values.quantile(0.90)),
-                "percent_above_standard_high": percent_above,
+                "standard_low": float(standard_low) if standard_low is not None else None,
+                "standard_high": float(standard_high) if standard_high is not None else None,
                 "percent_below_standard_low": percent_below,
-                "standard_low": float(standard_low) if pd.notna(standard_low) else None,
-                "standard_high": float(standard_high) if pd.notna(standard_high) else None,
+                "percent_above_standard_high": percent_above,
                 "is_demo_data": False,
             }
         )
@@ -513,8 +441,7 @@ def run_pipeline() -> None:
         raise SystemExit(1) from exc
 
     elderly_icu = extract_elderly_icu_stays(client)
-    vital_items = extract_icu_vital_items(client)
-    sample_df, _ = extract_vital_sign_sample(client)
+    sample_df, vital_items = extract_vital_sign_sample(client)
 
     if sample_df.empty:
         raise SystemExit("No vital sign rows were extracted from BigQuery.")
@@ -563,10 +490,10 @@ def run_pipeline() -> None:
         "p50",
         "p75",
         "p90",
-        "percent_above_standard_high",
-        "percent_below_standard_low",
         "standard_low",
         "standard_high",
+        "percent_below_standard_low",
+        "percent_above_standard_high",
         "is_demo_data",
     ]], PROCESSED_DIR / "vital_signs_elderly_icu_summary.csv")
     _write_legacy_heart_rate_outputs(sample_df, summary_df)

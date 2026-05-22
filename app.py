@@ -15,11 +15,12 @@ st.caption("Phase 1: local RAG only, with TF-IDF retrieval over MIMIC-IV summari
 
 sample_questions = [
     "What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?",
-    "How should heart rate above 100 bpm be interpreted in elderly ICU patients?",
     "For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?",
     "For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this low?",
     "For a patient aged 86 with respiratory rate 24 in the first 12h ICU stay, is this elevated?",
-    "How should SpO2 below 92% be interpreted in elderly ICU patients?",
+    "For a patient aged 80 with SpO2 90% in the first 24h ICU stay, is this low?",
+    "For a patient aged 75 with systolic blood pressure 145 mmHg in the first 6h ICU stay, is this high?",
+    "For a patient aged 88 with temperature 38.5°C in the first 12h ICU stay, is this high?",
     "Which MIMIC-IV tables are useful for ICU vital signs?",
     "Why should raw chartevents not be indexed directly in a RAG system?",
     "Why are alarm items excluded from the vital sign pipeline?",
@@ -47,15 +48,12 @@ vital_sign_filter = st.selectbox(
     [
         "All",
         "Heart Rate",
-        "SpO2",
         "Respiratory Rate",
         "MAP",
         "Systolic Blood Pressure",
         "Diastolic Blood Pressure",
         "Temperature",
-        "Temperature Celsius",
-        "Temperature Fahrenheit",
-        "General",
+        "SpO2",
     ],
 )
 age_group_filter = st.selectbox(
