@@ -3,15 +3,69 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.generate_rag_answer import generate_rag_answer
-from src.retrieve_chunks import retrieve_chunks
-from src.rag_utils import detect_query_intent, detect_threshold_condition, infer_direction_from_query, infer_time_window_from_query, infer_vital_sign_from_query, infer_age_group_from_query
+from src.semantic_rag import (
+    EMBEDDING_MODEL,
+    LLM_MODEL,
+    generate_grounded_answer,
+    is_allowed_source_file,
+    retrieve_semantic_chunks,
+)
 
 
 st.set_page_config(page_title="ICU Trajectory RAG Assistant", page_icon="ICU", layout="wide")
 
-st.title("ICU Trajectory RAG Assistant")
-st.caption("Phase 1: local RAG only, with TF-IDF retrieval over MIMIC-IV summaries and project documents.")
+st.markdown(
+    """
+    <style>
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(15, 76, 129, 0.14), transparent 24%),
+                radial-gradient(circle at top right, rgba(23, 120, 103, 0.12), transparent 20%),
+                linear-gradient(180deg, #f7f9fc 0%, #eef3f8 100%);
+        }
+        .hero {
+            padding: 1.2rem 1.4rem;
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.82);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+        }
+        .card {
+            padding: 1rem 1.1rem;
+            border-radius: 0.9rem;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+        }
+        .small-muted {
+            color: #5b6472;
+            font-size: 0.92rem;
+        }
+        .section-label {
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #4a5568;
+            font-size: 0.75rem;
+            font-weight: 700;
+            margin-bottom: 0.3rem;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="hero">
+        <div class="section-label">ICU Trajectory RAG Assistant</div>
+        <h1 style="margin:0 0 0.35rem 0;">Phase 1 Semantic RAG Explorer</h1>
+        <p style="margin:0; max-width: 900px;">
+            Local semantic retrieval over MIMIC-IV summaries and project documents, with ChromaDB embeddings and a grounded local LLM answer.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 sample_questions = [
     "What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?",
@@ -29,55 +83,55 @@ sample_questions = [
 
 if "question" not in st.session_state:
     st.session_state.question = sample_questions[0]
+if "last_answer" not in st.session_state:
+    st.session_state.last_answer = ""
+if "last_retrieved" not in st.session_state:
+    st.session_state.last_retrieved = []
 
-st.sidebar.header("Controls")
-sample_choice = st.sidebar.selectbox("Suggested questions", ["Custom"] + sample_questions)
+st.sidebar.markdown("### Query Builder")
+st.sidebar.caption("Choose a preset or keep your own question. The controls below shape retrieval only.")
+
+sample_choice = st.sidebar.selectbox("Suggested question", ["Custom"] + sample_questions)
 if sample_choice != "Custom":
     st.session_state.question = sample_choice
 
-question = st.text_area("Question", value=st.session_state.question, height=120)
+question = st.text_area("Question", value=st.session_state.question, height=140, placeholder="Ask about a vital sign, a threshold, or a dataset detail...")
 st.session_state.question = question
 
-top_k = st.slider("Top-k chunks", min_value=3, max_value=10, value=5, step=1)
-source_type_filter = st.selectbox(
-    "Source type filter",
+st.sidebar.markdown("### Retrieval Controls")
+top_k = st.sidebar.slider("Top-k chunks", min_value=3, max_value=10, value=5, step=1)
+source_type_filter = st.sidebar.selectbox(
+    "Source type",
     ["All", "mimic_stats", "project_report", "documentation", "article", "guideline"],
 )
-vital_sign_filter = st.selectbox(
-    "Vital sign filter",
-    [
-        "All",
-        "Heart Rate",
-        "Respiratory Rate",
-        "MAP",
-        "Systolic Blood Pressure",
-        "Diastolic Blood Pressure",
-        "Temperature",
-        "SpO2",
-    ],
+vital_sign_filter = st.sidebar.selectbox(
+    "Vital sign",
+    ["All", "Heart Rate", "Respiratory Rate", "MAP", "Systolic Blood Pressure", "Diastolic Blood Pressure", "Temperature", "SpO2"],
 )
-age_group_filter = st.selectbox(
-    "Age group filter",
-    ["All", "65-74", "75-84", "85+"],
-)
-time_window_filter = st.selectbox(
-    "Time window filter",
-    ["All", "first_6h", "first_12h", "first_24h"],
-)
+age_group_filter = st.sidebar.selectbox("Age group", ["All", "65-74", "75-84", "85+"])
+time_window_filter = st.sidebar.selectbox("Time window", ["All", "first_6h", "first_12h", "first_24h"])
 
-ask_clicked = st.button("Ask", type="primary")
+run_col, reset_col = st.sidebar.columns(2)
+ask_clicked = run_col.button("Run retrieval", type="primary", use_container_width=True)
+reset_clicked = reset_col.button("Reset", use_container_width=True)
+if reset_clicked:
+    st.session_state.question = sample_questions[0]
+    st.session_state.last_answer = ""
+    st.session_state.last_retrieved = []
+    st.rerun()
+
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("Mode", "Phase 1 Semantic RAG")
+col_b.metric("Index", "ChromaDB")
+col_c.metric("Embedding model", EMBEDDING_MODEL)
+col_d.metric("LLM", LLM_MODEL)
+
+st.caption("Source focus: MIMIC-IV summaries + project documents")
 
 if ask_clicked:
-    detected_intent = detect_query_intent(question)
-    inferred_age_group = infer_age_group_from_query(question)[0]
-    inferred_time_window = infer_time_window_from_query(question)[0]
-    inferred_vital_sign = infer_vital_sign_from_query(question)[0]
-    inferred_direction = infer_direction_from_query(question)
-    threshold_condition = detect_threshold_condition(question)
-
     with st.spinner("Retrieving local chunks..."):
         try:
-            retrieved = retrieve_chunks(
+            retrieved = retrieve_semantic_chunks(
                 question,
                 top_k=top_k,
                 source_type_filter=source_type_filter,
@@ -86,66 +140,99 @@ if ask_clicked:
                 time_window_filter=time_window_filter,
             )
         except FileNotFoundError as exc:
-            st.error(str(exc))
+            st.error(f"{exc}\n\nRun `python src/ingest.py` first to rebuild ChromaDB.")
             st.stop()
 
-    result = generate_rag_answer(question, retrieved, use_llm=False)
+    if not retrieved:
+        st.warning("No semantic chunks matched the current filters. Try broadening the source or vital-sign filters.")
+        st.stop()
 
-    answer_col, sources_col = st.columns([2, 1])
+    with st.spinner("Generating grounded answer with qwen2.5:14b..."):
+        answer_text = generate_grounded_answer(question, retrieved)
+
+    st.session_state.last_answer = answer_text
+    st.session_state.last_retrieved = retrieved
+
+    answer_col, sources_col = st.columns([1.45, 1])
 
     with answer_col:
-        st.subheader("Answer")
-        st.markdown(result["answer"])
-        st.caption(
-            f"Detected intent: {detected_intent} | effective_intent={result.get('effective_intent')} | age_group={inferred_age_group} | time_window={inferred_time_window} | "
-            f"vital_sign={inferred_vital_sign} | direction={inferred_direction} | threshold_condition={threshold_condition}"
-        )
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### Answer")
+        st.markdown(answer_text)
+        st.caption("Grounded in retrieved ChromaDB chunks only.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
     with sources_col:
-        st.subheader("Sources used")
-        if result["sources"]:
-            st.dataframe(pd.DataFrame(result["sources"]), use_container_width=True, hide_index=True)
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### Sources used")
+        sources_df = pd.DataFrame(
+            [
+                {
+                    "source_file": item.get("source_file"),
+                    "source_type": item.get("source_type"),
+                    "title": item.get("title"),
+                    "score": round(float(item.get("similarity_score", 0.0)), 4),
+                }
+                for item in retrieved
+                if is_allowed_source_file(str(item.get("source_file", "")))
+            ]
+        )
+        if not sources_df.empty:
+            st.dataframe(sources_df, width="stretch", hide_index=True)
         else:
             st.info("No sources available for the current query.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.subheader("Retrieved chunks")
+    st.markdown("### Retrieved chunks")
     if retrieved:
         chunks_view = pd.DataFrame(
             [
                 {
                     "rank": item.get("rank"),
-                    "chunk_id": item.get("chunk_id"),
-                    "doc_id": item.get("doc_id"),
-                    "final_score": item.get("final_score"),
-                    "metadata_boost": item.get("metadata_boost"),
-                    "mismatch_penalty": item.get("mismatch_penalty"),
-                    "tfidf_score": item.get("tfidf_score"),
-                    "keyword_bonus": item.get("keyword_bonus"),
+                    "source_file": item.get("source_file"),
                     "source_type": item.get("source_type"),
                     "vital_sign": item.get("vital_sign"),
-                    "itemid": item.get("itemid"),
-                    "label": item.get("label"),
-                    "unitname": item.get("unitname"),
                     "age_group": item.get("age_group"),
                     "time_window": item.get("time_window"),
-                    "section": item.get("section"),
+                    "distance": round(float(item.get("distance", 0.0)), 4),
+                    "similarity_score": round(float(item.get("similarity_score", 0.0)), 4),
                     "title": item.get("title"),
-                    "query_intent": item.get("query_intent"),
-                    "inferred_age_group": item.get("inferred_age_group"),
-                    "inferred_time_window": item.get("inferred_time_window"),
-                    "inferred_vital_sign": item.get("inferred_vital_sign"),
-                    "inferred_direction": item.get("inferred_direction"),
-                    "chunk_text": item.get("chunk_text"),
+                    "chunk_preview": item.get("chunk_preview"),
                 }
                 for item in retrieved
             ]
         )
-        st.dataframe(chunks_view, use_container_width=True, hide_index=True)
+        with st.expander("Show retrieved chunks and metadata", expanded=True):
+            st.dataframe(chunks_view, width="stretch", hide_index=True)
     else:
         st.info("No chunks were retrieved for this query.")
 
-    st.subheader("Clinical framing")
-    st.write(
-        "This response is a research aid for interpretation only and must not be used as a clinical decision. "
-        "It distinguishes standard thresholds from observed MIMIC-IV summaries and flags the current evidence limits."
-    )
+    with st.expander("Method and framing", expanded=False):
+        st.write(
+            "This response is a research aid for interpretation only and must not be used as a clinical decision. "
+            "It is grounded in the retrieved ChromaDB context and does not implement agents, MCP, or function calling."
+        )
+
+else:
+    st.markdown("### Quick start")
+    quick_col_1, quick_col_2 = st.columns(2)
+    with quick_col_1:
+        st.markdown(
+            """
+            <div class="card">
+            <div class="section-label">What to ask</div>
+            <p class="small-muted">Use the suggested clinical-context questions to test whether the top retrieved chunk matches the right vital sign, age group, and time window.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with quick_col_2:
+        st.markdown(
+            """
+            <div class="card">
+            <div class="section-label">How to read the output</div>
+            <p class="small-muted">The left panel gives the grounded answer from qwen2.5:14b; the right panel lists the retrieved project sources; the chunk table shows metadata, distance, and preview text.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )

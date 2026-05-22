@@ -1,83 +1,135 @@
-# ICU Trajectory RAG Assistant - Phase 1
+# ICU Trajectory RAG Assistant - Phase 1 Semantic RAG
 
-## 1. Project Overview
+## Project Overview
 
-This repository contains a local Python RAG (Retrieval-Augmented Generation) pipeline designed to explore ICU vital signs and clinical data. Originally relying on lexical search (TF-IDF), the system has been upgraded to a modern semantic architecture using dense embeddings, a vector database, and local LLM inference. 
+This repository implements a local Retrieval-Augmented Generation pipeline for ICU trajectory exploration. Phase 1 is now centered on a semantic architecture only: documents are ingested, chunked, embedded with `bge-m3:latest`, stored in ChromaDB, retrieved semantically, and answered by a local `qwen2.5:14b` model through Ollama.
 
-## 2. Phase 1 Objective
+The project is intended for academic interpretation and literature-style exploration, not for clinical diagnosis or treatment recommendation.
 
-The goal of Phase 1 is to implement a functional, end-to-end RAG system: user question -> semantic retrieval over indexed chunks -> grounded generation by an LLM. 
-The system is intended for academic interpretation and literature-style exploration, not for clinical decision support.
+## What This Phase Does
 
-## 3. What this phase does
+- Multi-format ingestion of Markdown, PDF, CSV, and R scripts.
+- Semantic embeddings with `bge-m3:latest`.
+- Persistent vector storage in ChromaDB.
+- Semantic retrieval with metadata-aware filtering.
+- Grounded local generation with `qwen2.5:14b`.
+- Streamlit interface for interactive questions and source inspection.
 
-The pipeline now features:
-* **Multi-format Ingestion:** Extracts and chunks data from structured tables (CSV), text documents (Markdown), and unstructured documents (PDF).
-* **Smart Chunking:** Uses a sliding window approach (800 characters with 120 overlap) to preserve semantic context.
-* **Semantic Embeddings:** Uses the `bge-m3:latest` model to convert chunks into dense vectors.
-* **Vector Storage:** Persistently stores embeddings and metadata using **ChromaDB**.
-* **Semantic Retrieval:** Uses L2 distance to retrieve the most contextually relevant chunks.
-* **Grounded Generation:** Uses `qwen2.5:14b` (or similar local LLM) acting as an academic assistant to formulate a precise answer based *strictly* on the retrieved context, preventing hallucinations.
+## What This Phase Does Not Do
 
-## 4. What this phase does NOT do
-
-This Phase 1 prototype does not implement:
-- Multi-step reasoning or Agentic workflows (planned for Phase 2).
-- Function calling / Tool Calling via MCP (planned for Phase 2).
-- Production deployment or cloud orchestration.
+- Agents.
+- MCP.
+- Function calling.
+- Tool calling.
+- Multi-agent orchestration.
+- FastAPI.
+- Docker.
 - Clinical diagnosis.
+- Treatment recommendation.
 
-## 5. Data Sources
+## Data Sources
 
-The system ingests heterogeneous data sources:
-- **Processed MIMIC-IV Data (CSV):** Vital sign summaries and patient cohorts (e.g., `elderly_icu_stays.csv`).
-- **Academic/Project Documents (PDF):** Course materials or reference reports (e.g., `Rapport_Final.pdf`).
-- **Text/Markdown (MD):** Project documentation (e.g., `README.md`).
+The semantic pipeline ingests whitelisted project sources such as:
 
-## 6. Prerequisites & Installation
+- `README.md`
+- `Rapport_Final.pdf`
+- `data/processed/vital_signs_elderly_icu_summary.csv`
+- `data/rag_documents/rag_documents.csv`
+- `R/03_mimic_preprocessing.R`
+- `R/04_exploratory_analysis.R`
+- `R/05_statistical_modeling.R`
+- `R/06_threshold_definition.R`
+- `R/07_validation_discussion.R`
 
-The project relies on a local Python environment and an active **Ollama** server for local inference.
+## Installation
 
-1. **Python Environment:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. **Ollama Setup:**
-Ensure Ollama is installed and running on your machine. Pull the required models:
+## Ollama Models
 
 ```bash
 ollama pull bge-m3:latest
 ollama pull qwen2.5:14b
 ```
 
-## 7. How to Run the Pipeline
+## Run the Semantic Pipeline
 
-### A. New Semantic RAG Pipeline (ChromaDB & Ollama)
-
-**Step 1: Data Ingestion & Vectorization**
-Run the ingestion script to parse the documents, generate embeddings, and populate the ChromaDB vector database.
+Build the vector database:
 
 ```bash
 python src/ingest.py
 ```
 
-*Expected output: Confirmation of the total number of chunks successfully indexed in ChromaDB.*
-
-**Step 2: Retrieval & Generation (RAG)**
-Run the RAG script to ask a question. The system will vectorize the query, retrieve the top chunks, and generate a grounded response.
+Run the Streamlit app:
 
 ```bash
-python src/rag.py
+streamlit run app.py
 ```
 
-### B. Legacy Pipeline (TF-IDF & Streamlit App)
+Recommended clean rebuild:
 
-If you need to re-extract data from BigQuery or run the original TF-IDF Streamlit interface:
+```bash
+rm -rf data/chroma_db
+python src/ingest.py
+streamlit run app.py
+```
 
-Run the legacy extraction and indexing pipeline:
+## Streamlit Interface
+
+The app exposes:
+
+- custom question input
+- top-k retrieval control
+- source type filtering
+- vital sign filtering
+- age group filtering
+- ICU time window filtering
+- retrieved sources and metadata
+
+It displays the active semantic stack as:
+
+- Mode: Phase 1 Semantic RAG
+- Index: ChromaDB
+- Embedding model: `bge-m3:latest`
+- LLM: `qwen2.5:14b`
+- Source focus: MIMIC-IV summaries + project documents
+
+## Example Questions
+
+- What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?
+- For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?
+- For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this low?
+- For a patient aged 80 with SpO2 90% in the first 24h ICU stay, is this low?
+
+## Architecture Summary
+
+```text
+Documents / CSV / PDF / R scripts
+→ whitelist-only ingestion
+→ chunking and CSV row normalization
+→ bge-m3 embeddings through Ollama
+→ ChromaDB vector database
+→ semantic retrieval with metadata filters
+→ qwen2.5:14b grounded answer
+```
+
+## Archived Legacy Pipeline
+
+The repository still contains older TF-IDF scripts for reference, but they are no longer used by the Streamlit app or the main workflow.
+
+Archived files:
+
+- `src/prepare_rag_documents.py`
+- `src/chunk_documents.py`
+- `src/build_rag_index.py`
+- `src/retrieve_chunks.py`
+- `src/rag_utils.py`
+
+Legacy commands, kept only for reference:
 
 ```bash
 python -m src.bigquery_extract_mimic
@@ -86,19 +138,6 @@ python -m src.chunk_documents
 python -m src.build_rag_index
 ```
 
-Run the local Streamlit app:
+## Phase 2 Direction
 
-```bash
-streamlit run app.py
-```
-
-## 8. Example Questions
-
-* "Quels sont les seuils adaptatifs pour la fréquence cardiaque des patients âgés ?"
-* "Quelle est la différence entre les percentiles du groupe 65-74 ans et ceux du groupe 85 ans et plus ?"
-* "For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?"
-* "What is the difference between standard thresholds and MIMIC-IV percentile-based summaries?"
-
-## 9. Next Step: Phase 2 (Agents & MCP)
-
-Phase 2 will transition this "passive" RAG into an active Agentic system. The LLM will use Function Calling to autonomously select tools (including this vector search, external APIs, or arithmetic calculators) via the Model Context Protocol (MCP) to solve complex, multi-step queries.
+Phase 2 will explore agents, MCP, and function calling. Phase 1 remains a local semantic RAG system only.
