@@ -4,10 +4,10 @@ This evaluation is intentionally small and Phase 1 only. It compares semantic re
 
 | Strategy | Precision proxy | Recall proxy | Latency | Cost | Complexity | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Semantic only | 25% | 100% | 173.1 ms | Medium | Low | ChromaDB similarity search with bge-m3 embeddings and no reranking. |
-| Semantic + metadata reranking | 75% | 100% | 94.4 ms | Medium | Medium | Similarity search plus strict metadata-aware reranking for patient-value questions. |
+| Semantic only | 25% | 100% | 1111.5 ms | Medium | Low | ChromaDB similarity search with bge-m3 embeddings and no reranking. |
+| Semantic + metadata reranking | 75% | 100% | 222.8 ms | Medium | Medium | Similarity search plus strict metadata-aware reranking for patient-value questions. |
 | Keyword / lexical baseline | 50% | 100% | 0.0 ms | Very low | Low | Simple lexical scoring over indexed documents only; no semantic embedding at retrieval time. |
-| Semantic + metadata filtering | 75% | 100% | 94.3 ms | Medium | Medium-high | Inference-guided metadata filters before reranking; high precision when metadata is clean. |
+| Semantic + metadata filtering | 75% | 100% | 269.0 ms | Medium | Medium-high | Inference-guided metadata filters before reranking; high precision when metadata is clean. |
 
 ## Table Handling
 

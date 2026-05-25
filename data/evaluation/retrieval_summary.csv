@@ -1,5 +1,5 @@
 top1_accuracy,exact_metadata_match_at_1,exact_metadata_match_at_k,average_latency_ms,precision_proxy,recall_proxy,strategy,strategy_latency_ms
-0.6,0.0,1.0,173.06400000000002,0.25,1.0,semantic_only,865.6206859959639
-0.8,1.0,1.0,94.418,0.75,1.0,semantic_reranked,472.3650189989712
-0.4,0.0,0.6666666666666666,0.0,0.5,1.0,keyword_baseline,95.441789002507
-0.8,1.0,1.0,94.33599999999998,0.75,1.0,metadata_filtered,471.9177090009907
+0.6,0.0,1.0,1111.5179999999998,0.25,1.0,semantic_only,5558.302798
+0.8,1.0,1.0,222.83599999999996,0.75,1.0,semantic_reranked,1114.8544270000684
+0.4,0.0,0.6666666666666666,0.0,0.5,1.0,keyword_baseline,216.17092100007085
+0.8,1.0,1.0,268.994,0.75,1.0,metadata_filtered,1346.0563610000236
