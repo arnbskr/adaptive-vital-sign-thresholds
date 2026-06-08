@@ -28,5 +28,9 @@ data/rag_index/
 data/agent_traces/
 data/phase2_outputs/
 
+# Generated evaluation outputs (retrieval + agent benchmarks)
+data/evaluation/
+
 # Figures (optionnel)
 figures/
+R/results/

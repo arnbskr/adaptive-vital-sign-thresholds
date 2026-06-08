@@ -170,23 +170,28 @@ The Streamlit app can also display the latest evaluation results if the files al
 
 ## Archived Legacy Pipeline
 
-The repository still contains older TF-IDF scripts for reference, but they are no longer used by the Streamlit app or the main workflow.
+The older TF-IDF prototype has been moved out of `src/` into
+`archive/legacy_phase1_tfidf/` (see the short README there). These scripts are no
+longer used by the Streamlit app or the active Phase 1 / Phase 2 workflows and are
+kept only for provenance. **Do not extend them.**
 
-Archived files:
+Archived files (`archive/legacy_phase1_tfidf/`):
 
-- `src/prepare_rag_documents.py`
-- `src/chunk_documents.py`
-- `src/build_rag_index.py`
-- `src/retrieve_chunks.py`
-- `src/rag_utils.py`
+- `prepare_rag_documents.py`
+- `chunk_documents.py`
+- `build_rag_index.py`
+- `retrieve_chunks.py`
+- `generate_rag_answer.py`
+- `rag.py`
+- `rag_utils.py`
 
-Legacy commands, kept only for reference:
+The MIMIC-IV extractor `src/bigquery_extract_mimic.py` is **kept in `src/`** (it
+documents how the processed CSVs were produced and is now self-contained — it no
+longer imports the archived `rag_utils`). It still requires GCP auth + MIMIC-IV
+access and is not part of the runtime app:
 
 ```bash
-python -m src.bigquery_extract_mimic
-python -m src.prepare_rag_documents
-python -m src.chunk_documents
-python -m src.build_rag_index
+python -m src.bigquery_extract_mimic   # upstream MIMIC-IV → data/processed/*.csv (needs GCP + MIMIC access)
 ```
 
 ## Phase 2 — Agentic RAG with MCP Tools

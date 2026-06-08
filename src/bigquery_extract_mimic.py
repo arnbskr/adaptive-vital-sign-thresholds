@@ -9,13 +9,35 @@ import pandas as pd
 from google.cloud import bigquery
 
 from .config import ALLOW_DEMO_FALLBACK, HOSP_DATASET, ICU_DATASET, PROJECT_ID, PROCESSED_DIR, ensure_data_directories
-from .rag_utils import age_group_from_age, time_window_from_hours
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ELDERLY_LIMIT = 1000
 EVENT_LIMIT = 10000
+
+
+# Canonical age-group / time-window bucketing. Inlined here (previously imported
+# from the now-archived legacy ``rag_utils``) so this upstream extractor is
+# self-contained. Must stay consistent with the vocab in src/semantic_rag.py.
+def age_group_from_age(age: float | int | None) -> str:
+    if age is None:
+        return "Unknown"
+    if age >= 85:
+        return "85+"
+    if age >= 75:
+        return "75-84"
+    return "65-74"
+
+
+def time_window_from_hours(hours_since_admission: float) -> str | None:
+    if hours_since_admission <= 6:
+        return "first_6h"
+    if hours_since_admission <= 12:
+        return "first_12h"
+    if hours_since_admission <= 24:
+        return "first_24h"
+    return None
 
 VITAL_GROUP_SPECS: list[dict[str, Any]] = [
     {"vital_sign": "Heart Rate", "itemids": [220045]},
