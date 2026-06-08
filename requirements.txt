@@ -10,3 +10,6 @@ python-dotenv
 chromadb
 pypdf
 openai
+# Phase 2: optional official MCP SDK. The local MCP-compatible layer in
+# src/mcp_server.py works without it; install to expose tools over MCP stdio.
+mcp

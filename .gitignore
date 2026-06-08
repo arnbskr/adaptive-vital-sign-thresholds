@@ -24,5 +24,9 @@ data/rag_documents/rag_documents.csv
 data/rag_chunks/
 data/rag_index/
 
+# Phase 2 agent run artifacts
+data/agent_traces/
+data/phase2_outputs/
+
 # Figures (optionnel)
 figures/

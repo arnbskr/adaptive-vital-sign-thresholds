@@ -189,6 +189,103 @@ python -m src.chunk_documents
 python -m src.build_rag_index
 ```
 
-## Phase 2 Direction
+## Phase 2 — Agentic RAG with MCP Tools
 
-Phase 2 will explore agents, MCP, and function calling. Phase 1 remains a local semantic RAG system only.
+Phase 2 adds a **single LLM agent** on top of the Phase 1 RAG without replacing
+it. The split of responsibilities is deliberate:
+
+- **Phase 1 (semantic RAG)** still provides the documentary sources.
+- **Deterministic tools** do all the calculations (thresholds, percentiles,
+  data-availability checks). The LLM never invents numbers.
+- **One agent** orchestrates: it extracts the patient context, decides which
+  tools to call, reads their results, and writes the final grounded answer.
+- **MCP** exposes the tools through a single boundary (`src/mcp_server.py`).
+- Every run produces an **auditable tool trace** saved to `data/agent_traces/`.
+
+This is intentionally **not** a multi-agent system: no supervisor, no sub-agents,
+no long-term memory, no FastAPI, no Docker, no real-time monitoring, and no
+clinical diagnosis or treatment recommendation.
+
+### Agent flow
+
+```text
+User question
+→ infer patient context (age, vital sign, value, time window)
+→ classify: patient_value / concept / dataset / pipeline / unsupported_or_missing_data
+→ call deterministic tools via the MCP layer (with a recorded trace)
+→ assemble a structured, non-clinical interpretation
+→ qwen2.5:14b rephrases it into the final grounded answer
+→ return answer + sources + tool_trace + warnings
+```
+
+For a patient-value question the agent calls, in order:
+`check_data_availability` → `get_vital_summary` → `compare_to_standard_threshold`
+→ `compare_to_percentiles` → `retrieve_project_context` (supporting context) →
+`generate_patient_interpretation_report`. If the exact MIMIC-IV summary is
+missing, the agent says so explicitly and **does not** substitute another vital
+sign or subgroup.
+
+### Deterministic tools (exposed via MCP)
+
+| Tool | Job |
+| --- | --- |
+| `check_data_availability` | Is there an exact summary for (vital, age group, time window)? |
+| `get_vital_summary` | Return the exact MIMIC-IV statistical summary row. |
+| `compare_to_standard_threshold` | Position a value against standard reference thresholds (descriptive). |
+| `compare_to_percentiles` | Position a value within the subgroup's P5–P90 distribution. |
+| `retrieve_project_context` | Reuse the Phase 1 semantic RAG for documentary context. |
+| `explain_threshold_type` | Explain standard vs. adaptive percentile thresholds. |
+| `generate_patient_interpretation_report` | Assemble the structured, non-clinical report. |
+
+The official `mcp` SDK is optional. `src/mcp_server.py` runs an MCP stdio server
+when the SDK is installed, and otherwise exposes the same tools through an
+MCP-compatible local registry (`call_tool(name, arguments)`) used by the agent.
+
+### Commands
+
+```bash
+# Build the knowledge base (clean rebuild; audits the whitelist after ingestion)
+python src/ingest.py
+
+# Run the app (Phase 1 + Phase 2 modes selectable in the sidebar)
+streamlit run app.py
+
+# Phase 1 retrieval-strategy benchmark
+python -m src.evaluate_retrieval
+
+# Phase 2 agent scenario test (writes data/evaluation/agent_evaluation.csv + agent_summary.md)
+python -m src.evaluate_agent
+
+# Inspect / serve the MCP tool catalogue
+python -m src.mcp_server
+
+# Restore the gitignored summary CSV from the index if it was lost
+python -m src.restore_summary_from_index
+```
+
+### Phase 2 example questions
+
+- For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?
+- For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this value low?
+- For a patient aged 80 with SpO2 90% in the first 24h ICU stay, is this low?
+- What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?
+- Which MIMIC-IV tables are used to derive ICU vital-sign summaries?
+
+### Phase 1 vs Phase 2
+
+| | Phase 1 | Phase 2 |
+| --- | --- | --- |
+| Core | Semantic retrieval + grounded answer | Single agent orchestrating tools + RAG |
+| Calculations | Implicit in retrieval/reranking | Explicit deterministic tools |
+| Comparisons | LLM reads retrieved stats | Tools compute, LLM only phrases |
+| Auditability | Retrieved chunks + scores | Full tool trace per run |
+| Scope | RAG only | RAG + tools + MCP (still single agent, non-clinical) |
+
+### Guardrails
+
+Every answer ends with: *"This response is for academic interpretation only and
+is not a clinical diagnosis or treatment recommendation."* The tools never use
+alarming language ("critical", "dangerous", "emergency"); they report position
+relative to reference thresholds and percentiles only. Missing data is reported,
+never fabricated, and a value is never compared against another vital sign's
+distribution.

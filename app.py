@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import streamlit as st
 
+from src.agent import run_agent
 from src.config import EVALUATION_DIR
 from src.evaluate_retrieval import run_retrieval_evaluation
 from src.semantic_rag import (
@@ -12,6 +15,9 @@ from src.semantic_rag import (
     is_allowed_source_file,
     retrieve_semantic_chunks,
 )
+
+PHASE_1 = "Phase 1 Semantic RAG"
+PHASE_2 = "Phase 2 Agentic RAG"
 
 
 st.set_page_config(page_title="ICU Trajectory RAG Assistant", page_icon="ICU", layout="wide")
@@ -90,6 +96,14 @@ if "last_answer" not in st.session_state:
 if "last_retrieved" not in st.session_state:
     st.session_state.last_retrieved = []
 
+st.sidebar.markdown("### Mode")
+mode = st.sidebar.radio(
+    "Pipeline mode",
+    [PHASE_1, PHASE_2],
+    help="Phase 1: semantic retrieval + grounded answer. Phase 2: a single LLM agent orchestrating deterministic MCP tools.",
+)
+is_phase2 = mode == PHASE_2
+
 st.sidebar.markdown("### Query Builder")
 st.sidebar.caption("Choose a preset or keep your own question. The controls below shape retrieval only.")
 
@@ -114,7 +128,9 @@ age_group_filter = st.sidebar.selectbox("Age group", ["All", "65-74", "75-84", "
 time_window_filter = st.sidebar.selectbox("Time window", ["All", "first_6h", "first_12h", "first_24h"])
 
 run_col, reset_col = st.sidebar.columns(2)
-ask_clicked = run_col.button("Run retrieval", type="primary", use_container_width=True)
+ask_clicked = run_col.button(
+    "Run agent" if is_phase2 else "Run retrieval", type="primary", use_container_width=True
+)
 reset_clicked = reset_col.button("Reset", use_container_width=True)
 if reset_clicked:
     st.session_state.question = sample_questions[0]
@@ -123,14 +139,14 @@ if reset_clicked:
     st.rerun()
 
 col_a, col_b, col_c, col_d = st.columns(4)
-col_a.metric("Mode", "Phase 1 Semantic RAG")
+col_a.metric("Mode", "Phase 2 Agentic" if is_phase2 else "Phase 1 Semantic RAG")
 col_b.metric("Index", "ChromaDB")
 col_c.metric("Embedding model", EMBEDDING_MODEL)
 col_d.metric("LLM", LLM_MODEL)
 
 st.caption("Source focus: MIMIC-IV summaries + project documents")
 
-if ask_clicked:
+if ask_clicked and not is_phase2:
     with st.spinner("Retrieving local chunks..."):
         try:
             retrieved = retrieve_semantic_chunks(
@@ -232,6 +248,93 @@ if ask_clicked:
             "This response is a research aid for interpretation only and must not be used as a clinical decision. "
             "It is grounded in the retrieved ChromaDB context and does not implement agents, MCP, or function calling."
         )
+
+elif ask_clicked and is_phase2:
+    with st.spinner("Running the single agent (deterministic tools + grounded LLM)..."):
+        agent_result = run_agent(question, top_k=top_k)
+
+    st.markdown("### Why this is Phase 2")
+    st.info(
+        "The system now uses a single LLM agent to orchestrate RAG retrieval and deterministic tools. "
+        "The agent can check data availability, retrieve exact vital summaries, compare values to thresholds "
+        "and percentiles, and produce a grounded answer with an auditable tool trace."
+    )
+
+    answer_col, ctx_col = st.columns([1.5, 1])
+    with answer_col:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### Final answer")
+        st.markdown(agent_result.get("answer", ""))
+        st.caption("Grounded in deterministic tool outputs and retrieved sources only.")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with ctx_col:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### Detected patient context")
+        st.json(agent_result.get("patient_context", {}))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Question type", str(agent_result.get("question_type", "")))
+    metric_cols[1].metric("Tools called", len(agent_result.get("tools_called", [])))
+    metric_cols[2].metric("Tool success", f"{agent_result.get('tool_call_success_rate', 0.0) * 100:.0f}%")
+    metric_cols[3].metric("Avg tool latency", f"{agent_result.get('average_tool_latency_ms', 0.0):.1f} ms")
+
+    for warning in agent_result.get("warnings", []):
+        st.warning(warning)
+
+    trace = agent_result.get("tool_trace", [])
+
+    def _find_tool_output(name):
+        for entry in trace:
+            if entry.get("tool_name") == name and entry.get("status") == "success":
+                return entry.get("outputs")
+        return None
+
+    standard_output = _find_tool_output("compare_to_standard_threshold")
+    percentile_output = _find_tool_output("compare_to_percentiles")
+    if standard_output or percentile_output:
+        comp_a, comp_b = st.columns(2)
+        with comp_a:
+            st.markdown("#### Standard-threshold comparison")
+            if standard_output:
+                st.json(standard_output)
+            else:
+                st.caption("Not applicable for this question.")
+        with comp_b:
+            st.markdown("#### MIMIC-IV percentile comparison")
+            if percentile_output:
+                st.json(percentile_output)
+            else:
+                st.caption("Not applicable for this question.")
+
+    st.markdown("### Agent tool trace")
+    if trace:
+        trace_df = pd.DataFrame(
+            [
+                {
+                    "step": entry.get("step"),
+                    "tool_name": entry.get("tool_name"),
+                    "inputs": json.dumps(entry.get("inputs", {}), default=str)[:300],
+                    "outputs summary": entry.get("outputs_summary"),
+                    "latency_ms": entry.get("latency_ms"),
+                    "status": entry.get("status"),
+                }
+                for entry in trace
+            ]
+        )
+        st.dataframe(trace_df, width="stretch", hide_index=True)
+    else:
+        st.info("No tools were called for this question.")
+
+    st.markdown("### RAG sources used")
+    sources_used = agent_result.get("sources_used", [])
+    if sources_used:
+        st.dataframe(pd.DataFrame({"source": sources_used}), width="stretch", hide_index=True)
+    else:
+        st.caption("No documentary sources were used for this question.")
+
+    if agent_result.get("trace_file"):
+        st.caption(f"Auditable trace saved to {agent_result['trace_file']}")
 
 else:
     st.markdown("### Quick start")

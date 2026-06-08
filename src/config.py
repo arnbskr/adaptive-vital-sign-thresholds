@@ -16,9 +16,16 @@ RAG_DOCUMENTS_DIR = DATA_DIR / "rag_documents"
 RAG_CHUNKS_DIR = DATA_DIR / "rag_chunks"
 RAG_INDEX_DIR = DATA_DIR / "rag_index"
 
+# Phase 2 (agentic RAG with deterministic tools) artefacts.
+AGENT_TRACES_DIR = DATA_DIR / "agent_traces"
+PHASE2_OUTPUTS_DIR = DATA_DIR / "phase2_outputs"
+
+# Canonical path to the MIMIC-IV statistical summary consumed by the tools.
+VITAL_SUMMARY_CSV = PROCESSED_DIR / "vital_signs_elderly_icu_summary.csv"
+
 
 def ensure_data_directories() -> None:
-    """Create the directories used by the Phase 1 pipeline if needed."""
+    """Create the directories used by the Phase 1 and Phase 2 pipelines if needed."""
 
     for directory in [
         DATA_DIR,
@@ -28,5 +35,7 @@ def ensure_data_directories() -> None:
         RAG_DOCUMENTS_DIR,
         RAG_CHUNKS_DIR,
         RAG_INDEX_DIR,
+        AGENT_TRACES_DIR,
+        PHASE2_OUTPUTS_DIR,
     ]:
         directory.mkdir(parents=True, exist_ok=True)

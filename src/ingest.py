@@ -51,6 +51,25 @@ FORBIDDEN_PATH_PARTS = (
     "node_modules",
 )
 
+# A source is authorised in the index only if it matches one of these prefixes
+# (and is not forbidden). Kept in sync with PROJECT_SOURCE_ALLOWLIST in
+# src/semantic_rag.py. The post-ingestion audit raises if anything else slipped
+# in (e.g. a stale requirements.txt left over from an older index build).
+ALLOWED_SOURCE_PREFIXES = (
+    "README.md",
+    "Rapport_Final.pdf",
+    "data/processed/vital_signs_elderly_icu_summary.csv",
+    "data/rag_documents/rag_documents.csv",
+    "R/",
+)
+
+
+def is_allowed_indexed_source(source_file: str) -> bool:
+    lowered = str(source_file).replace("\\", "/").lower()
+    if is_forbidden_source(lowered):
+        return False
+    return any(prefix.lower() in lowered for prefix in ALLOWED_SOURCE_PREFIXES)
+
 
 def build_client() -> OpenAI:
     return OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
@@ -353,7 +372,19 @@ def run_pipeline() -> None:
     LOGGER.info("Number of files ingested: %s", files_ingested)
     LOGGER.info("Number of chunks created: %s", chunks_created)
     LOGGER.info("Number of ChromaDB documents stored: %s", collection.count())
-    LOGGER.info("Unique source files indexed: %s", ", ".join(sorted(indexed_sources)))
+    LOGGER.info("Unique source files indexed:")
+    for source in sorted(indexed_sources):
+        LOGGER.info("  - %s", source)
+
+    # Strict whitelist audit: the index must contain ONLY authorised project
+    # sources. This is the guard requested in the Phase 2 brief so that stray
+    # files (such as a previously indexed requirements.txt) cannot survive.
+    unauthorized = sorted(source for source in indexed_sources if not is_allowed_indexed_source(source))
+    if unauthorized:
+        raise RuntimeError(
+            "Unauthorized source(s) found in the index, not in the whitelist: " + ", ".join(unauthorized)
+        )
+    LOGGER.info("Whitelist audit passed: all %s indexed sources are authorised.", len(indexed_sources))
 
 
 def main() -> None:
