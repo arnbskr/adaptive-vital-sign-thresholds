@@ -13,11 +13,13 @@ long-term memory, no real-time monitoring. Non-clinical by construction.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
-from .mcp_server import call_tool
+from .config import DEFAULT_TOOL_BACKEND
 from .semantic_rag import LLM_MODEL, build_ollama_client, infer_patient_context
+from .tool_client import ToolClient, get_tool_client, is_remote_backend
 from .tool_trace import ToolTrace, save_trace
 
 LOGGER = logging.getLogger(__name__)
@@ -76,6 +78,52 @@ def _direction(question: str) -> str:
 def _is_threshold_concept(question: str) -> bool:
     lowered = question.lower()
     return "threshold" in lowered or "percentile" in lowered or "adaptive" in lowered
+
+
+# Pure-arithmetic detection: lets the agent pick `calculatrice_medicale` instead
+# of the RAG/MIMIC tools when a question is just a calculation.
+_CALC_TRIGGERS = (
+    "what is", "what's", "calculate", "compute", "how much", "result of", "the result",
+    "multiply", "multiplied", "times", "divide", "divided", "plus", " add ", "added",
+    "sum of", "subtract", "minus",
+)
+_WORD_OPS = [
+    (("multiplied by", "multiply", "times", "product of"), "*"),
+    (("divided by", "divide", "divided", "over"), "/"),
+    (("plus", "add ", "added", "sum of", "increase", "increased by"), "+"),
+    (("minus", "subtract", "subtracted", "decrease", "decreased by", "less"), "-"),
+]
+
+
+def _extract_calculation(question: str) -> str | None:
+    """Return a safe arithmetic expression if the question is purely arithmetic.
+
+    Patient-value questions are classified earlier and never reach this; this only
+    fires when an arithmetic trigger word is present, so ranges like '65-74' in a
+    concept question are not mistaken for a subtraction.
+    """
+
+    text = question.lower()
+    if not any(trigger in text for trigger in _CALC_TRIGGERS):
+        return None
+
+    # Symbolic expression using * / % + (these never appear in age-group ranges).
+    match = re.search(r"\d+(?:\.\d+)?(?:\s*[*/%+]\s*\d+(?:\.\d+)?)+", question)
+    if match:
+        return match.group(0).strip()
+
+    # Spaced minus distinguishes "104 - 2" from a range like "65-74".
+    match = re.search(r"\d+(?:\.\d+)?\s+-\s+\d+(?:\.\d+)?", question)
+    if match:
+        return match.group(0).strip()
+
+    # Natural language: an operation word plus the first two numbers.
+    numbers = re.findall(r"\d+(?:\.\d+)?", question)
+    if len(numbers) >= 2:
+        for words, op in _WORD_OPS:
+            if any(word in text for word in words):
+                return f"{numbers[0]} {op} {numbers[1]}"
+    return None
 
 
 def _call_llm(prompt: str) -> tuple[str, str | None]:
@@ -143,27 +191,93 @@ Retrieved context:
 """
 
 
-def _safe_retrieve_context(trace: ToolTrace, query: str, top_k: int) -> dict[str, Any] | None:
-    """Call the RAG tool through MCP, tolerating retrieval failures (e.g. Ollama down)."""
+def _safe_retrieve_context(
+    trace: ToolTrace, client: ToolClient, query: str, top_k: int
+) -> dict[str, Any] | None:
+    """Call the RAG tool through the backend, tolerating retrieval failures (e.g. Ollama down)."""
 
     try:
         return trace.record(
             "retrieve_project_context",
             {"query": query, "top_k": top_k},
-            lambda: call_tool("retrieve_project_context", {"query": query, "top_k": top_k}),
+            lambda: client.call_tool("retrieve_project_context", {"query": query, "top_k": top_k}),
         )
     except Exception as exc:  # noqa: BLE001 - trace already recorded the error
         LOGGER.warning("retrieve_project_context failed: %s", exc)
         return None
 
 
-def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, Any]:
-    """Orchestrate tools + LLM for one question and return an auditable result."""
+def _resolve_tool_client(
+    tool_backend: str | None,
+    tool_client: ToolClient | None,
+    allow_fallback: bool,
+) -> tuple[ToolClient, bool, list[str]]:
+    """Return (client, owns_client, warnings).
 
-    trace = ToolTrace()
-    warnings: list[str] = []
+    A caller-supplied ``tool_client`` is used as-is (and not closed here). Otherwise
+    the requested backend is built; if a remote backend cannot be reached and
+    ``allow_fallback`` is set, we degrade to the local in-process backend with a
+    clear warning instead of crashing.
+    """
+
+    if tool_client is not None:
+        return tool_client, False, []
+
+    requested = tool_backend or DEFAULT_TOOL_BACKEND
+    try:
+        return get_tool_client(requested), True, []
+    except Exception as exc:  # noqa: BLE001 - remote unreachable / SDK missing
+        if is_remote_backend(requested) and allow_fallback:
+            warning = (
+                f"Remote MCP backend unavailable ({exc}); fell back to the local "
+                "in-process backend. Start `python src/server_mcp.py` to use the remote backend."
+            )
+            LOGGER.warning(warning)
+            return get_tool_client("local"), True, [warning]
+        raise
+
+
+def run_agent(
+    question: str,
+    top_k: int = 5,
+    persist: bool = True,
+    tool_backend: str | None = None,
+    tool_client: ToolClient | None = None,
+    allow_fallback: bool = True,
+) -> dict[str, Any]:
+    """Orchestrate tools + LLM for one question and return an auditable result.
+
+    ``tool_backend`` selects the tool backend ("local" / "mcp_remote"); it
+    defaults to ``DEFAULT_TOOL_BACKEND`` (env ``PHASE2_TOOL_BACKEND``). Pass a
+    ready ``tool_client`` to reuse an existing connection. The orchestration,
+    medical logic and non-clinical guarantees are identical across backends.
+    """
+
+    client, owns_client, warnings = _resolve_tool_client(tool_backend, tool_client, allow_fallback)
+    try:
+        return _run_agent_with_client(question, top_k, persist, client, warnings)
+    finally:
+        if owns_client:
+            client.close()
+
+
+def _run_agent_with_client(
+    question: str,
+    top_k: int,
+    persist: bool,
+    client: ToolClient,
+    warnings: list[str],
+) -> dict[str, Any]:
+    trace = ToolTrace(backend=client.name)
     context = infer_patient_context(question)
     question_type, missing_fields = _classify(question, context)
+    # A purely arithmetic question routes to the calculator tool, not the RAG/MIMIC
+    # tools. Only override non-patient classifications so patient questions win.
+    calc_expression: str | None = None
+    if question_type in {"concept_question", "dataset_question", "pipeline_question"}:
+        calc_expression = _extract_calculation(question)
+        if calc_expression:
+            question_type = "calculator_question"
     patient_context = {
         "is_patient_value_question": context.get("is_patient_value_question"),
         "age": context.get("age"),
@@ -185,7 +299,7 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
         availability = trace.record(
             "check_data_availability",
             {"vital_sign": vital_sign, "age_group": age_group, "time_window": time_window},
-            lambda: call_tool("check_data_availability", {
+            lambda: client.call_tool("check_data_availability", {
                 "vital_sign": vital_sign, "age_group": age_group, "time_window": time_window}),
         )
 
@@ -201,7 +315,7 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
             summary = trace.record(
                 "get_vital_summary",
                 {"vital_sign": vital_sign, "age_group": age_group, "time_window": time_window},
-                lambda: call_tool("get_vital_summary", {
+                lambda: client.call_tool("get_vital_summary", {
                     "vital_sign": vital_sign, "age_group": age_group, "time_window": time_window}),
             )
             standard_comparison = trace.record(
@@ -209,7 +323,7 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
                 {"vital_sign": vital_sign, "value": value,
                  "standard_low": summary.get("standard_low"), "standard_high": summary.get("standard_high"),
                  "unitname": summary.get("unitname", "")},
-                lambda: call_tool("compare_to_standard_threshold", {
+                lambda: client.call_tool("compare_to_standard_threshold", {
                     "vital_sign": vital_sign, "value": value,
                     "standard_low": summary.get("standard_low"), "standard_high": summary.get("standard_high"),
                     "unitname": summary.get("unitname", "")}),
@@ -217,10 +331,10 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
             percentile_comparison = trace.record(
                 "compare_to_percentiles",
                 {"value": value, "summary": summary, "direction": direction},
-                lambda: call_tool("compare_to_percentiles", {
+                lambda: client.call_tool("compare_to_percentiles", {
                     "value": value, "summary": summary, "direction": direction}),
             )
-            rag_context = _safe_retrieve_context(trace, question, top_k=3)
+            rag_context = _safe_retrieve_context(trace, client, question, top_k=3)
             if rag_context is None:
                 warnings.append("Supporting RAG retrieval was unavailable; answer relies on the exact summary only.")
 
@@ -228,7 +342,7 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
                 "generate_patient_interpretation_report",
                 {"question": question, "patient_context": patient_context, "summary": "<summary>",
                  "standard_comparison": "<standard>", "percentile_comparison": "<percentile>"},
-                lambda: call_tool("generate_patient_interpretation_report", {
+                lambda: client.call_tool("generate_patient_interpretation_report", {
                     "question": question, "patient_context": patient_context, "summary": summary,
                     "standard_comparison": standard_comparison, "percentile_comparison": percentile_comparison,
                     "rag_context": rag_context}),
@@ -247,6 +361,24 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
             else:
                 answer = llm_answer
 
+    elif question_type == "calculator_question":
+        calc = trace.record(
+            "calculatrice_medicale",
+            {"expression": calc_expression},
+            lambda: client.call_tool("calculatrice_medicale", {"expression": calc_expression}),
+        )
+        if calc.get("status") == "ok":
+            answer = (
+                f"The result of {calc.get('expression')} is {calc.get('result')}. "
+                "(Arithmetic helper tool; not a clinical calculation.)"
+            )
+        else:
+            warnings.append(f"Could not evaluate the arithmetic expression '{calc_expression}'.")
+            answer = (
+                f"I could not evaluate the expression '{calc_expression}'. Please provide a simple "
+                "arithmetic expression such as '104 * 2'."
+            )
+
     elif question_type == "unsupported_or_missing_data":
         warnings.append(
             "Incomplete patient context; missing: " + ", ".join(missing_fields) + "."
@@ -259,11 +391,11 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
         )
 
     else:  # concept_question / dataset_question / pipeline_question
-        rag_context = _safe_retrieve_context(trace, question, top_k=top_k)
+        rag_context = _safe_retrieve_context(trace, client, question, top_k=top_k)
         extra = ""
         if question_type == "concept_question" and _is_threshold_concept(question):
             explanation = trace.record(
-                "explain_threshold_type", {}, lambda: call_tool("explain_threshold_type", {})
+                "explain_threshold_type", {}, lambda: client.call_tool("explain_threshold_type", {})
             )
             extra = (
                 f"Standard threshold: {explanation['standard_threshold']}\n"
@@ -295,7 +427,8 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
         else:
             answer = llm_answer
 
-    if CLINICAL_WARNING not in answer:
+    # Purely arithmetic answers stay concise and skip the heavy clinical warning.
+    if question_type != "calculator_question" and CLINICAL_WARNING not in answer:
         answer = f"{answer.rstrip()}\n\n{CLINICAL_WARNING}"
 
     result = {
@@ -305,6 +438,7 @@ def run_agent(question: str, top_k: int = 5, persist: bool = True) -> dict[str, 
         "answer": answer,
         "patient_context": patient_context,
         "sources_used": sources_used,
+        "tool_backend": client.name,
         "tool_trace": trace.as_list(),
         "tools_called": trace.tool_names(),
         "warnings": warnings,

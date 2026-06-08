@@ -1,65 +1,52 @@
+"""Real MCP network backend server (streamable-http) for Phase 2.
+
+This is the **network execution mode** of the *same* Phase 2 system: it exposes
+the exact same tool set as the in-process registry (``src/mcp_server.py``) by
+wrapping the shared ``TOOL_SPECS`` -- the seven specialized deterministic tools
+plus the demonstration ``calculatrice_medicale``. No tool logic is defined or
+duplicated here; the agent reaches these tools through ``MCPRemoteBackend``
+exactly as it reaches the local backend, so behaviour is identical.
+
+Run (serves on ``MCP_REMOTE_URL``, default ``http://127.0.0.1:8000/mcp``):
+
+    python src/server_mcp.py          # or: python -m src.server_mcp
+
+Requires the ``mcp`` SDK, a running Ollama (``bge-m3:latest`` + ``qwen2.5:14b``)
+and the ChromaDB index at ``data/chroma_db``. Descriptive / non-clinical only.
+"""
+
+from __future__ import annotations
+
 import os
-import chromadb
-from openai import OpenAI
-from mcp.server.fastmcp import FastMCP
+import sys
+from urllib.parse import urlparse
 
-# 1. Initialisation du serveur MCP
-# On utilise FastMCP comme indiqué dans le cours
-mcp = FastMCP("Serveur_MCP_MIMIC_ICU")
+# Make ``python src/server_mcp.py`` work as a script (root not on sys.path then).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 2. Initialisation des clients (Ollama + ChromaDB) pour l'outil RAG
-llm_client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")
-chroma_client = chromadb.PersistentClient(path="./data/chroma_db")
-collection = chroma_client.get_collection(name="icu_rag")
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-# --- DÉFINITION DES OUTILS (TOOLS) MCP ---
+from src.config import MCP_REMOTE_URL  # noqa: E402
+from src.mcp_server import TOOL_SPECS  # noqa: E402
 
-@mcp.tool()
-def rechercher_informations_cliniques(question: str) -> str:
-    """
-    Outil MCP : Recherche dans la base documentaire RAG (base vectorielle MIMIC-IV).
-    L'agent DOIT utiliser cet outil pour trouver des informations sur les patients âgés, 
-    les signes vitaux ou les seuils physiologiques.
-    """
-    print(f"[Serveur MCP] Requête RAG reçue : {question}")
-    try:
-        # Embedding de la requête avec bge-m3
-        response = llm_client.embeddings.create(model="bge-m3:latest", input=question)
-        query_embedding = response.data[0].embedding
-        
-        # Retrieval vectoriel (Top 3)
-        results = collection.query(query_embeddings=[query_embedding], n_results=3)
-        
-        # Assembler le contexte récupéré
-        if results['documents'] and results['documents'][0]:
-            contexte_pertinent = "\n".join(results['documents'][0])
-            return f"Informations trouvées dans la base :\n{contexte_pertinent}"
-        else:
-            return "Aucune information pertinente trouvée dans la base documentaire."
-    except Exception as e:
-        return f"Erreur lors de la recherche vectorielle : {str(e)}"
+# Configure host/port/path from the single source of truth (MCP_REMOTE_URL) so
+# client and server stay in sync and nothing is hardcoded in two places.
+_parsed = urlparse(MCP_REMOTE_URL)
+mcp = FastMCP(
+    "icu-trajectory-mcp",
+    host=_parsed.hostname or "127.0.0.1",
+    port=_parsed.port or 8000,
+    streamable_http_path=_parsed.path or "/mcp",
+)
 
-@mcp.tool()
-def calculatrice_medicale(expression: str) -> str:
-    """
-    Outil MCP : Exécute un calcul mathématique simple.
-    L'agent DOIT utiliser cet outil pour calculer des variations de fréquence cardiaque, 
-    des moyennes de pression artérielle ou toute autre opération arithmétique.
-    """
-    print(f"[Serveur MCP] Requête de calcul reçue : {expression}")
-    # Sécurité basique pour éviter l'exécution de code malveillant
-    allowed_chars = set("0123456789+-*/(). ")
-    if not set(expression).issubset(allowed_chars):
-        return "Erreur : expression non autorisée. Utilisez uniquement des chiffres et opérateurs de base."
-    try:
-        result = eval(expression, {"__builtins__": {}}, {})
-        return f"Résultat du calcul : {result}"
-    except Exception as e:
-        return f"Erreur de calcul : {str(e)}"
+# Expose every shared tool (7 specialized + calculatrice_medicale) over MCP by
+# wrapping the existing implementations. FastMCP introspects each function's
+# signature/docstring for the input schema. Same registry as the local backend.
+for _spec in TOOL_SPECS:
+    mcp.add_tool(_spec.func, name=_spec.name, description=_spec.description)
 
-# --- LANCEMENT DU SERVEUR ---
 
 if __name__ == "__main__":
-    print("Démarrage du Serveur MCP sur le port 8000...")
-    # Le cours recommande d'exposer le serveur sur HTTP via streamable-http
+    print(f"Starting ICU MCP server (streamable-http) on {MCP_REMOTE_URL} ...")
+    print(f"Exposing {len(TOOL_SPECS)} tools: {', '.join(s.name for s in TOOL_SPECS)}")
     mcp.run(transport="streamable-http")

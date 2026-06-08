@@ -43,9 +43,9 @@ async def run_agent():
             ]"""
 
             messages = [
-                {"role": "system", "content": """Tu es un agent clinique expert. 
+                {"role": "system", "content": """Tu es un agent clinique expert (démonstration, non clinique).
                 RÈGLES IMPORTANTES :
-                1. Utilise 'rechercher_informations_cliniques' pour trouver des données.
+                1. Utilise 'retrieve_project_context' (ou 'get_vital_summary') pour trouver des données.
                 2. Si tu dois faire un calcul, tu DOIS extraire la valeur numérique exacte du texte AVANT d'utiliser la 'calculatrice_medicale'.
                 3. N'envoie JAMAIS de mots ou de variables comme 'resultat' dans la calculatrice. Envoie uniquement des chiffres (ex: '107 * 2')."""},
                 {"role": "user", "content": question}

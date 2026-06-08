@@ -30,12 +30,24 @@ def _summarize(value: Any, max_length: int = 600) -> str:
 
 
 class ToolTrace:
-    """Collects an ordered list of tool-call records."""
+    """Collects an ordered list of tool-call records.
 
-    def __init__(self) -> None:
+    ``backend`` is the default backend label (e.g. "local" / "mcp_remote")
+    stamped on every entry, so the same trace works for both the in-process and
+    the real-MCP-network backends. Individual calls may override it.
+    """
+
+    def __init__(self, backend: str = "local") -> None:
         self.entries: list[dict[str, Any]] = []
+        self.backend = backend
 
-    def record(self, tool_name: str, inputs: dict[str, Any], func: Callable[[], Any]) -> Any:
+    def record(
+        self,
+        tool_name: str,
+        inputs: dict[str, Any],
+        func: Callable[[], Any],
+        backend: str | None = None,
+    ) -> Any:
         """Run ``func`` (a zero-arg callable), timing it and capturing the result.
 
         On success the output is stored and returned. On error the entry is
@@ -44,6 +56,7 @@ class ToolTrace:
         """
 
         step = len(self.entries) + 1
+        backend_label = backend or self.backend
         started = time.perf_counter()
         timestamp = datetime.now().isoformat(timespec="seconds")
         try:
@@ -53,6 +66,7 @@ class ToolTrace:
                 {
                     "step": step,
                     "tool_name": tool_name,
+                    "backend": backend_label,
                     "inputs": inputs,
                     "outputs": output,
                     "outputs_summary": _summarize(output),
@@ -68,6 +82,7 @@ class ToolTrace:
                 {
                     "step": step,
                     "tool_name": tool_name,
+                    "backend": backend_label,
                     "inputs": inputs,
                     "outputs": {"error": str(exc)},
                     "outputs_summary": f"error: {exc}",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 PROJECT_ID = "mimic-rag-2026-vinith"
@@ -22,6 +23,14 @@ PHASE2_OUTPUTS_DIR = DATA_DIR / "phase2_outputs"
 
 # Canonical path to the MIMIC-IV statistical summary consumed by the tools.
 VITAL_SUMMARY_CSV = PROCESSED_DIR / "vital_signs_elderly_icu_summary.csv"
+
+# Phase 2 tool backend selection.
+# - "local"      : in-process MCP-compatible registry (default, no server needed).
+# - "mcp_remote" : real MCP server over streamable-http at MCP_REMOTE_URL.
+# Both are overridable via environment variables so nothing is hardcoded at the
+# call sites (agent, evaluation, Streamlit).
+DEFAULT_TOOL_BACKEND = os.environ.get("PHASE2_TOOL_BACKEND", "local")
+MCP_REMOTE_URL = os.environ.get("MCP_REMOTE_URL", "http://127.0.0.1:8000/mcp")
 
 
 def ensure_data_directories() -> None:

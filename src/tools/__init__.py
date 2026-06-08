@@ -7,6 +7,7 @@ report assembly). The single LLM agent (``src.agent``) and the MCP server
 itself. Tools are descriptive and academic only -- never clinical.
 """
 
+from .calculator import calculatrice_medicale
 from .data_availability import check_data_availability
 from .percentile_comparison import compare_to_percentiles
 from .project_context import retrieve_project_context
@@ -22,4 +23,5 @@ __all__ = [
     "compare_to_percentiles",
     "retrieve_project_context",
     "generate_patient_interpretation_report",
+    "calculatrice_medicale",
 ]

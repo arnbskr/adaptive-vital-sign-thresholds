@@ -20,6 +20,7 @@ import json
 from typing import Any, Callable
 
 from .tools import (
+    calculatrice_medicale,
     check_data_availability,
     compare_to_percentiles,
     compare_to_standard_threshold,
@@ -92,6 +93,14 @@ TOOL_SPECS: list[ToolSpec] = [
             "rag_context": "dict|null (optional)",
         },
         generate_patient_interpretation_report,
+    ),
+    ToolSpec(
+        "calculatrice_medicale",
+        "Demonstration-only safe calculator: evaluate a simple arithmetic expression "
+        "(numbers and + - * / // % ** and parentheses) via a strict AST, never eval(). "
+        "Use this for purely arithmetic questions instead of the RAG/MIMIC tools.",
+        {"expression": "str"},
+        calculatrice_medicale,
     ),
 ]
 

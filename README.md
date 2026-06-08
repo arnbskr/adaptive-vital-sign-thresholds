@@ -225,7 +225,7 @@ For a patient-value question the agent calls, in order:
 missing, the agent says so explicitly and **does not** substitute another vital
 sign or subgroup.
 
-### Deterministic tools (exposed via MCP)
+### Deterministic tools
 
 | Tool | Job |
 | --- | --- |
@@ -236,10 +236,40 @@ sign or subgroup.
 | `retrieve_project_context` | Reuse the Phase 1 semantic RAG for documentary context. |
 | `explain_threshold_type` | Explain standard vs. adaptive percentile thresholds. |
 | `generate_patient_interpretation_report` | Assemble the structured, non-clinical report. |
+| `calculatrice_medicale` | Demonstration-only safe arithmetic (AST, never `eval()`) — picked for purely numeric questions. |
 
-The official `mcp` SDK is optional. `src/mcp_server.py` runs an MCP stdio server
-when the SDK is installed, and otherwise exposes the same tools through an
-MCP-compatible local registry (`call_tool(name, arguments)`) used by the agent.
+### One Phase 2 architecture, two execution backends
+
+Phase 2 uses a **unified `ToolClient`-based architecture**. The single agent calls
+deterministic tools through a backend abstraction (`src/tool_client.py`); the same
+tools and the same outputs are used whichever backend runs. There is **one**
+architecture with two execution backends — not two separate pipelines:
+
+```
+question → src/agent.py → src/tool_client.py → tool backend → src/tools/ → src/tool_trace.py → answer
+```
+
+- **Local backend (default).** In-process via `LocalToolBackend → src/mcp_server.py`.
+  Stable, fast, no external server, no `mcp` SDK required. This is what Streamlit uses
+  by default.
+- **MCP remote backend (optional).** A real MCP `streamable-http` server
+  (`src/server_mcp.py`) reached via `MCPRemoteBackend`: the client connects over HTTP,
+  performs the handshake, **discovers the tools dynamically**, and calls them over the
+  network. The server exposes the **same tools** (it wraps the same shared registry —
+  no duplicated logic).
+
+Select the backend with `PHASE2_TOOL_BACKEND` (`local` | `mcp_remote`), the
+`run_agent(..., tool_backend=...)` argument, or the Streamlit sidebar (*Advanced
+settings (Phase 2) → Tool execution backend*). If the remote backend is selected but
+the server is unreachable, the agent **falls back to local with a clear warning** and
+never crashes. Every tool call is recorded in the same auditable trace, tagged with
+its backend (`local` / `mcp_remote`).
+
+The agent picks the tool by question type: **patient-value** questions use the
+data/threshold/percentile tools; **conceptual** questions use `retrieve_project_context`
+(+ `explain_threshold_type`); **purely arithmetic** questions use `calculatrice_medicale`
+only (no ChromaDB / MIMIC lookup). `src/agent2.py` remains a standalone ReAct client
+demo against the same server and is not used by `app.py`.
 
 ### Commands
 
@@ -247,16 +277,21 @@ MCP-compatible local registry (`call_tool(name, arguments)`) used by the agent.
 # Build the knowledge base (clean rebuild; audits the whitelist after ingestion)
 python src/ingest.py
 
-# Run the app (Phase 1 + Phase 2 modes selectable in the sidebar)
+# Run the app — local backend by default (Phase 1 + Phase 2 modes in the sidebar)
 streamlit run app.py
+
+# Run the app against the real MCP network backend
+python src/server_mcp.py                              # terminal 1: start the MCP HTTP server
+PHASE2_TOOL_BACKEND=mcp_remote streamlit run app.py   # terminal 2: app uses the remote backend
 
 # Phase 1 retrieval-strategy benchmark
 python -m src.evaluate_retrieval
 
-# Phase 2 agent scenario test (writes data/evaluation/agent_evaluation.csv + agent_summary.md)
-python -m src.evaluate_agent
+# Phase 2 agent scenario test (writes data/evaluation/agent_evaluation*.csv + agent_summary*.md)
+python -m src.evaluate_agent --backend local
+python -m src.evaluate_agent --backend mcp_remote     # needs the MCP server running; skips cleanly otherwise
 
-# Inspect / serve the MCP tool catalogue
+# Inspect / serve the in-process MCP tool catalogue
 python -m src.mcp_server
 
 # Restore the gitignored summary CSV from the index if it was lost
@@ -265,11 +300,11 @@ python -m src.restore_summary_from_index
 
 ### Phase 2 example questions
 
-- For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?
-- For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this value low?
-- For a patient aged 80 with SpO2 90% in the first 24h ICU stay, is this low?
-- What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?
-- Which MIMIC-IV tables are used to derive ICU vital-sign summaries?
+- **Patient-value:** For a patient aged 82 with mean HR 104 bpm in the first 24h ICU stay, is this value high?
+- **Patient-value:** For a patient aged 78 with MAP 62 mmHg in the first 24h ICU stay, is this value low?
+- **Conceptual RAG:** What is the difference between a standard clinical threshold and an adaptive percentile-based threshold?
+- **Dataset:** Which MIMIC-IV tables are used to derive ICU vital-sign summaries?
+- **Calculator:** What is 104 * 2?  (the agent calls `calculatrice_medicale`, not the RAG/MIMIC tools)
 
 ### Phase 1 vs Phase 2
 
