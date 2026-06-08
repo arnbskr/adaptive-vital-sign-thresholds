@@ -64,6 +64,12 @@ Build the vector database:
 python src/ingest.py
 ```
 
+Launch the MCP server:
+
+```bash
+python src/server_mcp.py
+```
+
 Run the Streamlit app:
 
 ```bash
