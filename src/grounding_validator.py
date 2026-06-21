@@ -48,6 +48,11 @@ def extract_numbers_from_text(text: str) -> list[str]:
     cleaned = _PHASE_RE.sub(" ", str(text))
     numbers: list[str] = []
     for match in _NUMBER_RE.finditer(cleaned):
+        start = match.start()
+        # Skip digits that are part of a label token (e.g. "Q1", "Q3", "P90",
+        # "p25"): a number glued to a preceding letter is a label, not a value.
+        if start > 0 and cleaned[start - 1].isalpha():
+            continue
         token = match.group(0)
         if _YEAR_RE.match(token.lstrip("-")):
             continue  # ignore calendar years (2024, 2026, ...)
