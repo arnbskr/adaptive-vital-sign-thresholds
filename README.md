@@ -481,3 +481,100 @@ inputs/outputs, latency and backend — the auditable record (also saved to
   histograms (the summary stores aggregates, not raw values).
 - Outcomes beyond ICU/hospital LOS (categorical admission type, mortality rate) are
   deferred and not part of the shipped table.
+
+## Phase 3+ — LangGraph, Grounding Validator and Controlled Memory
+
+Phase 3+ hardens the Phase 3 explorer along three axes from the course, **without
+changing what the system does** (same deterministic tools, same non-clinical
+guarantees, same evaluation). It lives on the `phase3-langgraph-memory-grounding`
+branch.
+
+### 1. LangGraph as the Phase 3 architecture (`src/phase3_graph_agent.py`)
+
+The Phase 3 workflow is expressed as an explicit **LangGraph `StateGraph`** with a
+typed state (`Phase3GraphState`) and six **role-based nodes**:
+
+```text
+START
+  → safety_agent     (detect_clinical_advice_request; refuse + stop if clinical)
+  → [conditional]    (refused → END ; else → intent)
+  → intent_agent     (resolve variable / age_group / time_window / metric; + session memory)
+  → data_agent       (call the right deterministic tool via ToolClient + ToolTrace)
+  → evidence_agent   (generate_evidence_card when relevant)
+  → answer_agent     (LLM reformulation; deterministic fallback; never invents numbers)
+  → grounding_agent  (validate_numeric_grounding over the tool trace)
+  → END
+```
+
+`answer` runs **before** `grounding` because grounding validates the numbers in the
+produced answer. Two execution engines coexist behind the same result shape:
+
+- **Classic** — the original procedural agent (`src/agent.py`), default-safe.
+- **LangGraph** — `run_phase3_graph_agent(...)`; if `langgraph` is not installed it
+  **falls back to the classic agent with a warning** (never crashes).
+
+```bash
+python -m src.phase3_graph_agent "Compare creatinine across age groups in first_24h."
+python -m src.phase3_graph_agent "Should this patient receive treatment for high lactate?"
+python -m src.evaluate_phase3 --backend local --engine classic     # 10/10
+python -m src.evaluate_phase3 --backend local --engine langgraph    # 10/10
+```
+
+In Streamlit (Phase 3 mode), *Phase 3 engine & memory* lets you pick the engine
+(LangGraph by default when available) and shows the **role nodes executed**.
+
+### 2. Numeric grounding validator (`src/grounding_validator.py`)
+
+A lightweight, deterministic guardrail (Cours 9 spirit): it collects every number
+in the recorded tool trace and checks that each number in the final answer is
+supported there, with simple rounding tolerance (`1.40` ≈ `1.4`), ignoring phase
+labels and years. It is **advisory** — it never blocks or rewrites the answer, it
+only adds a warning and a `grounding_validation` block to the result (and a panel in
+Streamlit). The Phase 3 evaluation includes a `numeric_grounding_ok` metric.
+
+### 3. Controlled session memory (`src/session_memory.py`)
+
+Session-only, **no long-term store, no patient-level data, no raw MIMIC values** —
+it keeps only the *last query context* (`last_variable`, `last_age_group`,
+`last_time_window`, `last_metric`, `last_intent`, `last_tool`). It rewrites simple
+follow-ups into full standalone questions the intent detector already understands:
+
+| Follow-up | Rewritten using memory |
+| --- | --- |
+| `What about creatinine?` | `Summarize creatinine for 75-84 in first_24h.` |
+| `And for 85+?` | `Summarize lactate for 85+ in first_24h.` |
+| `What about first_12h?` | `Summarize lactate for 75-84 in first_12h.` |
+| `Compare it across age groups.` | `Compare lactate across age groups in first_24h.` |
+| `Now p90?` | `What is the p90 of lactate for 75-84 in first_24h?` |
+
+Streamlit shows *"Using session context: …"* when memory is applied and offers a
+**Clear Phase 3 memory** button. Complete standalone questions are never rewritten.
+
+### Role-based "multi-agent" — what it is and is not
+
+The six nodes are a **role-based decomposition** (separation of responsibilities +
+auditability) implemented as LangGraph nodes. It is **not** an autonomous
+multi-agent debate, consensus, or swarm system: there is still **one** orchestrated
+flow, deterministic tools, and a single auditable trace.
+
+### What Phase 3+ deliberately does NOT do
+
+- **No real self-learning** — the system never modifies its own behavior from
+  feedback (see *Why no self-learning?* below).
+- **No autonomous multi-agent** — no debate/consensus/swarm.
+- **No patient-level memory** — session memory holds only last query *context*.
+- **No clinical use** — descriptive, non-clinical by construction.
+
+### Future Work — Why no self-learning?
+
+Self-modifying agents (reflection loops that rewrite prompts/policies from observed
+errors) were shown in class, but are **deliberately out of scope** here:
+
+- **ICU context & safety** — an academic, non-clinical tool must be predictable; a
+  system that silently changes its own behavior is the opposite of auditable.
+- **Stability for presentation** — deterministic tools + explicit evaluation give
+  reproducible results; self-modification would make runs non-reproducible.
+- **Auditability over autonomy** — we prefer an explicit evaluation suite
+  (`evaluate_phase3.py`) and a numeric grounding check to uncontrolled self-tuning.
+
+The chosen direction is **more control and traceability**, not more autonomy.

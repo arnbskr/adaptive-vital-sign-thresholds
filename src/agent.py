@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from .config import DEFAULT_TOOL_BACKEND
+from .grounding_validator import validate_numeric_grounding
 from .semantic_rag import LLM_MODEL, build_ollama_client, infer_patient_context
 from .tool_client import ToolClient, get_tool_client, is_remote_backend
 from .tool_trace import ToolTrace, save_trace
@@ -700,6 +701,13 @@ def _run_agent_with_client(
     if question_type != "calculator_question" and CLINICAL_WARNING not in answer:
         answer = f"{answer.rstrip()}\n\n{CLINICAL_WARNING}"
 
+    # Phase 3 numeric grounding guardrail (advisory; never blocks the answer).
+    grounding_validation = None
+    if question_type.startswith("phase3_"):
+        grounding_validation = validate_numeric_grounding(answer, trace.as_list())
+        if grounding_validation.get("warning"):
+            warnings.append(grounding_validation["warning"])
+
     result = {
         "mode": MODE,
         "question": question,
@@ -707,6 +715,7 @@ def _run_agent_with_client(
         "answer": answer,
         "patient_context": patient_context,
         "evidence_card": evidence_card,
+        "grounding_validation": grounding_validation,
         "sources_used": sources_used,
         "tool_backend": client.name,
         "tool_trace": trace.as_list(),

@@ -87,18 +87,27 @@ def _context_recognized(scenario: dict[str, Any], result: dict[str, Any]) -> boo
     return all(checks) if checks else "n/a"
 
 
-def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
+def _run_engine(question: str, tool_backend: str, engine: str) -> dict[str, Any]:
+    if engine == "langgraph":
+        from .phase3_graph_agent import run_phase3_graph_agent
+        return run_phase3_graph_agent(question, tool_backend=tool_backend)
+    return run_agent(question, persist=True, tool_backend=tool_backend)
+
+
+def run_phase3_evaluation(tool_backend: str = "local", engine: str = "classic") -> tuple[str, str]:
     ensure_data_directories()
     rows: list[dict[str, Any]] = []
     for scenario in SCENARIOS:
-        LOGGER.info("[%s] Evaluating: %s", tool_backend, scenario["question"])
-        result = run_agent(scenario["question"], persist=True, tool_backend=tool_backend)
+        LOGGER.info("[%s/%s] Evaluating: %s", tool_backend, engine, scenario["question"])
+        result = _run_engine(scenario["question"], tool_backend, engine)
         tools_called = result.get("tools_called", [])
         answer = result.get("answer", "")
 
         expected_tool_called = scenario["expected_tool"] in tools_called
         phase12_not_called = not any(t in tools_called for t in _PHASE12_TOOLS)
         evidence_present = result.get("evidence_card") is not None
+        grounding = result.get("grounding_validation") or {}
+        numeric_grounding_ok = grounding.get("is_grounded", "n/a") if grounding else "n/a"
         warning_present = CLINICAL_WARNING in answer
         refusal_ok = (
             (result.get("question_type") == "clinical_advice_refused"
@@ -116,15 +125,19 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
             "context_recognized": _context_recognized(scenario, result),
             "evidence_card_present": evidence_present if scenario["evidence_required"] else "n/a",
             "evidence_required_ok": (evidence_present if scenario["evidence_required"] else True),
+            "numeric_grounding_ok": numeric_grounding_ok,
             "non_clinical_warning_present": warning_present,
             "clinical_refusal_ok": refusal_ok,
+            "engine": result.get("engine", engine),
+            "nodes_executed": "|".join(result.get("nodes_executed", []) or []),
             "tools_called": "|".join(tools_called),
             "backend_used": result.get("tool_backend"),
             "average_tool_latency_ms": result.get("average_tool_latency_ms", 0.0),
         })
 
     frame = pd.DataFrame(rows)
-    csv_path = EVALUATION_DIR / "phase3_evaluation.csv"
+    suffix = "_langgraph" if engine == "langgraph" else ""
+    csv_path = EVALUATION_DIR / f"phase3_evaluation{suffix}.csv"
     frame.to_csv(csv_path, index=False)
 
     def _rate(col: str) -> float:
@@ -138,6 +151,7 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
         "phase12_tools_not_called_rate": round(frame["phase12_tools_not_called"].mean(), 4),
         "context_recognized_rate": _rate("context_recognized"),
         "evidence_required_ok_rate": round(frame["evidence_required_ok"].mean(), 4),
+        "numeric_grounding_ok_rate": _rate("numeric_grounding_ok"),
         "non_clinical_warning_rate": round(frame["non_clinical_warning_present"].mean(), 4),
         "clinical_refusal_ok_rate": _rate("clinical_refusal_ok"),
     }
@@ -147,7 +161,7 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
         "",
         "Single-agent routing over the multi-variable ICU feature tools. Descriptive, non-clinical.",
         "",
-        f"Tool backend: **{tool_backend}**.",
+        f"Tool backend: **{tool_backend}** · Engine: **{engine}**.",
         "",
         "## Aggregate metrics",
         "",
@@ -159,6 +173,7 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
         f"| Phase 1/2 tools NOT called | {summary['phase12_tools_not_called_rate']} |",
         f"| Variable/age/window recognized | {summary['context_recognized_rate']} |",
         f"| Evidence card present (when required) | {summary['evidence_required_ok_rate']} |",
+        f"| Numeric grounding ok | {summary['numeric_grounding_ok_rate']} |",
         f"| Non-clinical warning present | {summary['non_clinical_warning_rate']} |",
         f"| Clinical-advice refusal correct | {summary['clinical_refusal_ok_rate']} |",
         "",
@@ -174,11 +189,11 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
             f"{row['context_recognized']} | {row['evidence_card_present']} | "
             f"{row['non_clinical_warning_present']} |"
         )
-    md_path = EVALUATION_DIR / "phase3_summary.md"
+    md_path = EVALUATION_DIR / f"phase3_summary{suffix}.md"
     md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
 
     LOGGER.info("Saved Phase 3 evaluation to %s and %s", csv_path, md_path)
-    print("\n=== PHASE 3 EVALUATION SUMMARY ===")
+    print(f"\n=== PHASE 3 EVALUATION SUMMARY (engine={engine}) ===")
     for key, value in summary.items():
         print(f"  {key}: {value}")
     return str(csv_path), str(md_path)
@@ -187,8 +202,10 @@ def run_phase3_evaluation(tool_backend: str = "local") -> tuple[str, str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 3 agent evaluation.")
     parser.add_argument("--backend", default="local", help="Tool backend: 'local' (default) or 'mcp_remote'.")
+    parser.add_argument("--engine", default="classic", choices=("classic", "langgraph"),
+                        help="Phase 3 execution engine: 'classic' (src/agent.py) or 'langgraph'.")
     args = parser.parse_args()
-    run_phase3_evaluation(tool_backend=args.backend)
+    run_phase3_evaluation(tool_backend=args.backend, engine=args.engine)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ from src.agent import run_agent
 from src.config import EVALUATION_DIR
 from src.evaluate_retrieval import run_retrieval_evaluation
 from src.mcp_server import list_tools as list_agent_tools
+from src.phase3_graph_agent import is_langgraph_available, run_phase3_graph_agent
+from src.session_memory import resolve_followup_question, update_phase3_memory
 from src.semantic_rag import (
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -297,6 +299,28 @@ if uses_agent:
                 "Start `python src/server_mcp.py` first. If unreachable, the agent "
                 "falls back to the local backend with a warning."
             )
+
+phase3_engine = "classic"
+if is_phase3:
+    with st.sidebar.expander("Phase 3 engine & memory", expanded=False):
+        _lg_ok = is_langgraph_available()
+        engine_options = ["LangGraph agent", "Classic agent"] if _lg_ok else ["Classic agent"]
+        engine_label = st.radio(
+            "Phase 3 execution engine",
+            engine_options,
+            captions=(["Role-based StateGraph (safety→intent→data→evidence→answer→grounding).",
+                       "The original procedural agent."][: len(engine_options)]),
+        )
+        phase3_engine = "langgraph" if engine_label.startswith("LangGraph") else "classic"
+        if not _lg_ok:
+            st.caption("Install `langgraph` to enable the LangGraph engine (`pip install langgraph`).")
+        if st.button("Clear Phase 3 memory"):
+            st.session_state["phase3_memory"] = {}
+            st.caption("Phase 3 session memory cleared.")
+        _mem_now = st.session_state.get("phase3_memory", {})
+        if _mem_now:
+            st.caption("Session memory: " + ", ".join(
+                f"{k.replace('last_', '')}={v}" for k, v in _mem_now.items()))
 
 st.sidebar.markdown("### Suggested questions")
 suggested_options = (
@@ -684,8 +708,32 @@ elif ask_clicked and is_phase2:
 # --------------------------------------------------------------------------- #
 
 elif ask_clicked and is_phase3:
+    # Controlled, session-only memory: rewrite simple follow-ups ("What about creatinine?").
+    phase3_memory = st.session_state.setdefault("phase3_memory", {})
+    effective_question, resolved_context = resolve_followup_question(question, phase3_memory)
+    if resolved_context:
+        ctx_bits = ", ".join(
+            f"{k}={resolved_context.get(k)}" for k in ("variable", "age_group", "time_window", "metric")
+            if resolved_context.get(k))
+        st.info(f"Using session context: {ctx_bits}")
+        st.caption(f"Interpreted as: {effective_question}")
+
     with st.spinner("Running the ICU Multi-Data agent (deterministic tools + grounded LLM)..."):
-        agent_result = run_agent(question, top_k=top_k, tool_backend=tool_backend)
+        if phase3_engine == "langgraph":
+            try:
+                agent_result = run_phase3_graph_agent(
+                    effective_question, tool_backend=tool_backend, memory_context=phase3_memory)
+            except Exception as exc:  # noqa: BLE001 - never crash the UI
+                st.warning(f"LangGraph engine failed ({exc}); falling back to the classic agent.")
+                agent_result = run_agent(effective_question, top_k=top_k, tool_backend=tool_backend)
+        else:
+            agent_result = run_agent(effective_question, top_k=top_k, tool_backend=tool_backend)
+
+    # Update the session memory from this answer (Phase 3 data answers only).
+    st.session_state["phase3_memory"] = update_phase3_memory(phase3_memory, agent_result)
+
+    engine_used = agent_result.get("engine", "classic")
+    nodes_executed = agent_result.get("nodes_executed", []) or []
 
     trace = agent_result.get("tool_trace", [])
     warnings = agent_result.get("warnings", [])
@@ -706,7 +754,18 @@ elif ask_clicked and is_phase3:
     metric_cols[0].metric("Question type", qtype)
     metric_cols[1].metric("Tools called", len(agent_result.get("tools_called", [])))
     metric_cols[2].metric("Tool success", f"{agent_result.get('tool_call_success_rate', 0.0) * 100:.0f}%")
-    metric_cols[3].metric("Tool backend", str(agent_result.get("tool_backend", "local")))
+    metric_cols[3].metric("Engine", str(engine_used))
+
+    if nodes_executed:
+        st.markdown("### Role-based agent nodes (LangGraph)")
+        st.caption(
+            "Role-based decomposition implemented as LangGraph nodes (separation of "
+            "responsibilities + auditability) — not an autonomous multi-agent debate."
+        )
+        st.dataframe(
+            pd.DataFrame({"Order": range(1, len(nodes_executed) + 1), "Role node": nodes_executed}),
+            width="stretch", hide_index=True,
+        )
 
     def _p3_output(name: str):
         entry = trace_by_name.get(name)
@@ -716,6 +775,23 @@ elif ask_clicked and is_phase3:
 
     if qtype == "clinical_advice_refused":
         st.error("Clinical-advice request refused: this tool is descriptive and non-clinical only.")
+
+    grounding = agent_result.get("grounding_validation")
+    if isinstance(grounding, dict):
+        st.markdown("### Numeric grounding validation")
+        if grounding.get("is_grounded"):
+            st.success("All numbers in the answer are supported by the tool outputs.")
+        else:
+            st.warning(
+                "Some numbers in the answer are not found in the tool outputs "
+                f"(unsupported: {', '.join(grounding.get('numbers_unsupported', []))})."
+            )
+        _kv_table([
+            ("Grounded", grounding.get("is_grounded")),
+            ("Numbers in answer", ", ".join(grounding.get("numbers_in_answer", [])) or "—"),
+            ("Supported", ", ".join(grounding.get("numbers_supported", [])) or "—"),
+            ("Unsupported", ", ".join(grounding.get("numbers_unsupported", [])) or "—"),
+        ])
 
     if isinstance(evidence_card, dict) and not evidence_card.get("error"):
         st.markdown("### Evidence card")

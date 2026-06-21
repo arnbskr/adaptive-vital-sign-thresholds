@@ -193,6 +193,35 @@ population missingness. Keep every answer ending with the non-clinical warning.
 **Git discipline:** never `git add .`; stage only the intended Phase 3 files. Never
 commit `icu_patient_features.csv` or gitignored evaluation/trace outputs.
 
+## Phase 3+ layer (LangGraph engine, grounding validator, controlled memory)
+
+Phase 3+ (branch `phase3-langgraph-memory-grounding`) hardens Phase 3 without
+changing behavior. All additive; classic Phase 3 and Phase 1/2 stay intact.
+
+**Active Phase 3+ files:**
+
+- `src/grounding_validator.py` — deterministic numeric-grounding guardrail (`validate_numeric_grounding`): every number in the answer must appear in the tool trace (rounding tolerance; ignores phase labels/years). **Advisory** — never blocks. Wired into `src/agent.py` (key `grounding_validation`, **Phase 3 only**) and shown in Streamlit.
+- `src/phase3_graph_agent.py` — the Phase 3 workflow as a **LangGraph `StateGraph`** with 6 role nodes (`safety_agent → intent_agent → data_agent → evidence_agent → answer_agent → grounding_agent`; conditional edge: clinical → END). `run_phase3_graph_agent(question, tool_backend, memory_context)` returns the **same dict shape** as `run_agent` (+ `engine`, `nodes_executed`). **Reuses `src/agent.py` helpers** — no duplicated medical logic. Degrades to the classic agent if `langgraph` is absent (never crashes).
+- `src/session_memory.py` — session-only follow-up memory (`update_phase3_memory`, `resolve_followup_question`, `clear_phase3_memory`). Stores only last *context* (variable/age/window/metric/intent/tool); **no raw MIMIC data, no patient-level data, no long-term store**.
+- `src/evaluate_phase3.py` — now `--engine classic|langgraph` (+ `numeric_grounding_ok` metric); writes `phase3_evaluation{,_langgraph}.{csv,md}` (gitignored).
+- `app.py` — Phase 3 sidebar *Phase 3 engine & memory* (engine picker, default LangGraph when installed; Clear-memory button); renders engine, role nodes, grounding panel, and "Using session context".
+- `requirements.txt` — `langgraph` added as **OPTIONAL** (classic agent runs without it).
+
+**Run / evaluate Phase 3+:**
+
+```bash
+python -m src.phase3_graph_agent "Compare creatinine across age groups in first_24h."
+python -m src.evaluate_phase3 --backend local --engine classic     # must stay 10/10
+python -m src.evaluate_phase3 --backend local --engine langgraph    # must stay 10/10
+python -m src.evaluate_agent  --backend local                       # Phase 2 must stay 5/5
+```
+
+**Role-based, not autonomous multi-agent:** the 6 nodes are a role decomposition for
+auditability — one orchestrated flow, deterministic tools, single trace. **No**
+debate/consensus/swarm, **no real self-learning** (the system never self-modifies
+from feedback — deliberate, for stability/auditability/non-clinical safety), **no**
+patient-level memory.
+
 ## R analysis pipeline (`R/`)
 
 Numbered phases `01`–`07` run in order in RStudio (`adaptive-vital-sign-thresholds.Rproj`), producing the processed CSVs the RAG layer later consumes. `01`/`02` are learning/exploration; `03`–`06` do HR cleaning, percentile-based adaptive-threshold modeling, and interpretable scoring; `07` is validation. They read/write `data/processed/*.csv` (gitignored as sensitive MIMIC data). Tidyverse/data.table based, comments in French.
