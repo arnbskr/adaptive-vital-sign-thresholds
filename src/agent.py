@@ -126,6 +126,151 @@ def _extract_calculation(question: str) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Phase 3 intent detection (multi-variable ICU explorer). Deterministic regex /
+# keyword routing over the variables in icu_feature_summary.csv. Patient-value,
+# concept, dataset, pipeline and calculator routing are untouched; Phase 3 only
+# claims questions that would otherwise fall to the generic concept/dataset path.
+# --------------------------------------------------------------------------- #
+_VARIABLE_ALIASES: list[tuple[str, str]] = [
+    ("mean arterial pressure", "map"), ("arterial pressure", "map"), ("map", "map"),
+    ("systolic blood pressure", "sbp"), ("systolic", "sbp"), ("sbp", "sbp"),
+    ("diastolic blood pressure", "dbp"), ("diastolic", "dbp"), ("dbp", "dbp"),
+    ("heart rate", "heart_rate"), ("heart_rate", "heart_rate"), ("hr", "heart_rate"),
+    ("respiratory rate", "respiratory_rate"), ("respiratory_rate", "respiratory_rate"),
+    ("resp rate", "respiratory_rate"), ("rr", "respiratory_rate"),
+    ("temperature", "temperature"), ("temp", "temperature"),
+    ("oxygen saturation", "spo2"), ("o2 saturation", "spo2"), ("spo2", "spo2"),
+    ("oxygen flow", "o2_flow"), ("o2 flow", "o2_flow"), ("o2_flow", "o2_flow"),
+    ("glasgow coma", "gcs_total"), ("gcs_total", "gcs_total"), ("gcs", "gcs_total"),
+    ("central venous", "cvp"), ("cvp", "cvp"), ("fio2", "fio2"), ("glucose", "glucose"),
+    ("lactate", "lactate"), ("creatinine", "creatinine"), ("bilirubin", "bilirubin_total"),
+    ("platelet", "platelets"), ("white blood", "wbc"), ("wbc", "wbc"),
+    ("hemoglobin", "hemoglobin"), ("haemoglobin", "hemoglobin"), ("hgb", "hemoglobin"),
+    ("sodium", "sodium"), ("potassium", "potassium"), ("bicarbonate", "bicarbonate"),
+    ("blood ph", "ph_blood"), ("ph_blood", "ph_blood"), ("ph", "ph_blood"),
+    ("pao2", "pao2"), ("paco2", "paco2"), ("inr", "inr"),
+]
+_VARIABLE_ALIASES.sort(key=lambda kv: len(kv[0]), reverse=True)
+
+_AVAILABLE_PATTERNS = (
+    "what variables", "which variables", "list variables", "list icu variables",
+    "what icu variables", "variables are available", "available variables",
+    "variables do you have", "what data is available", "what labs", "labs are available",
+    "labs do you have", "what can you analyze", "what variables can",
+)
+_AGE_COMPARE_KEYWORDS = ("across age", "between age", "each age", "by age group", "which age group", "age groups")
+_WINDOW_COMPARE_KEYWORDS = ("across time", "between time", "time window", "over time", "evolve", "evolution")
+_METRICS = ("p05", "p25", "p50", "p75", "p90", "p95")
+
+# A "strong" Phase 3 signal lets a multi-variable question win even when the
+# patient-value classifier would otherwise grab it (e.g. a variable name plus an
+# age range that looks like a numeric value). Genuine patient-value questions
+# ("is HR 104 high?") contain none of these, so they are untouched.
+_STRONG_PHASE3_SIGNALS = (
+    "compare", "across", "summarize", "summarise", "statistics", "statistic",
+    "evolve", "evolution", "distribution", "available", "list ", "which age",
+    "time window", "over time", "highest", "lowest", "by age group",
+    "p05", "p25", "p50", "p75", "p90", "p95",
+)
+
+
+def _is_strong_phase3(question: str) -> bool:
+    t = question.lower()
+    return any(signal in t for signal in _STRONG_PHASE3_SIGNALS)
+
+
+def _resolve_variable(text: str) -> str | None:
+    padded = f" {text.lower()} "
+    for alias, canonical in _VARIABLE_ALIASES:
+        if re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", padded):
+            return canonical
+    return None
+
+
+def _extract_age_group(text: str) -> str | None:
+    t = text.lower()
+    if "85+" in t or re.search(r"\b85\s*(\+|plus|and older|or older|and over)\b", t):
+        return "85+"
+    if "75-84" in t or re.search(r"\b75\s*(?:-|–|to)\s*84\b", t):
+        return "75-84"
+    if "65-74" in t or re.search(r"\b65\s*(?:-|–|to)\s*74\b", t):
+        return "65-74"
+    match = re.search(r"\b(?:aged|age)\s*(\d{2,3})\b", t)
+    if match:
+        age = int(match.group(1))
+        if age >= 85:
+            return "85+"
+        if age >= 75:
+            return "75-84"
+        if age >= 65:
+            return "65-74"
+    return None
+
+
+def _windows_mentioned(text: str) -> list[str]:
+    t = text.lower().replace("_", " ")
+    found = []
+    if re.search(r"\b6\s*h(?:ours?)?\b", t):
+        found.append("first_6h")
+    if re.search(r"\b12\s*h(?:ours?)?\b", t):
+        found.append("first_12h")
+    if re.search(r"\b24\s*h(?:ours?)?\b", t):
+        found.append("first_24h")
+    return found
+
+
+def _extract_time_window(text: str) -> str | None:
+    windows = _windows_mentioned(text)
+    return windows[0] if len(windows) == 1 else None
+
+
+def _extract_metric(text: str) -> str | None:
+    t = text.lower()
+    for metric in _METRICS:
+        if metric in t:
+            return metric
+    if "median" in t:
+        return "median"
+    if "mean" in t or "average" in t:
+        return "mean"
+    return None
+
+
+def _infer_phase3_intent(question: str) -> dict[str, Any] | None:
+    """Return a Phase 3 intent dict, or None if the question is not Phase 3."""
+
+    t = question.lower()
+    if any(p in t for p in _AVAILABLE_PATTERNS):
+        category = "lab" if ("lab" in t and "vital" not in t) else (
+            "vital_sign" if ("vital" in t or "charted" in t) else None)
+        return {"intent": "available_variables", "variable_category": category}
+
+    variable = _resolve_variable(t)
+    if not variable:
+        return None
+
+    age_group = _extract_age_group(t)
+    time_window = _extract_time_window(t)
+    metric = _extract_metric(t)
+
+    age_compare = any(k in t for k in _AGE_COMPARE_KEYWORDS) or (
+        "age group" in t and any(k in t for k in ("compare", "highest", "lowest", "higher", "lower")))
+    window_compare = any(k in t for k in _WINDOW_COMPARE_KEYWORDS) or len(_windows_mentioned(t)) >= 2
+
+    if age_compare:
+        return {"intent": "compare_age_groups", "variable_name": variable,
+                "time_window": time_window or "first_24h", "metric": metric}
+    if window_compare:
+        return {"intent": "compare_time_windows", "variable_name": variable,
+                "age_group": age_group or "75-84", "metric": metric}
+    if age_group and time_window:
+        return {"intent": "variable_summary", "variable_name": variable,
+                "age_group": age_group, "time_window": time_window, "metric": metric}
+    return {"intent": "cohort_statistics", "variable_name": variable,
+            "age_group": age_group, "time_window": time_window, "metric": metric}
+
+
 def _call_llm(prompt: str) -> tuple[str, str | None]:
     """Call the local LLM. Returns (text, warning). On failure returns ("", warning)."""
 
@@ -189,6 +334,97 @@ Question: {question}
 Retrieved context:
 {context_text}{extra_block}
 """
+
+
+def _phase3_prompt(question: str, intent: str, payload: dict[str, Any], evidence_card: dict[str, Any] | None) -> str:
+    card_text = evidence_card.get("text", "") if isinstance(evidence_card, dict) else ""
+    return f"""You are the single academic assistant agent for the ICU Multi-Data Explorer (Phase 3).
+Rephrase the deterministic tool output below into a clear, concise, NON-CLINICAL answer.
+Use ONLY the numbers provided; never invent values. Answer in the user's language.
+Never diagnose, never recommend treatment, never use words like "critical", "dangerous", or "at risk".
+If a missing-rate warning is present, mention that the figures reflect a capped sample.
+
+Intent: {intent}
+Question: {question}
+
+Tool output (JSON-like):
+{payload}
+
+{card_text}
+
+End your answer with: "{CLINICAL_WARNING}"
+"""
+
+
+def _phase3_deterministic_answer(intent: str, payload: dict[str, Any], evidence_card: dict[str, Any] | None) -> str:
+    """Assemble an answer from tool output when the LLM is unavailable."""
+
+    if payload.get("error"):
+        known = payload.get("known_variables")
+        extra = f" Known variables: {', '.join(known)}." if known else ""
+        return f"{payload['error']}{extra}\n\n{CLINICAL_WARNING}"
+    if intent == "available_variables":
+        names = ", ".join(v["variable_name"] for v in payload.get("variables", []))
+        body = f"{payload.get('count', 0)} ICU variables available ({names})."
+    elif intent in ("variable_summary", "cohort_statistics"):
+        body = payload.get("readable_summary") or str({k: payload.get(k) for k in ("variable_name", "median", "p90", "unit")})
+    else:  # compare_*
+        body = payload.get("descriptive", str(payload))
+    card_text = f"\n\n{evidence_card.get('text', '')}" if isinstance(evidence_card, dict) and evidence_card.get("text") else ""
+    return f"{body}{card_text}\n\n{CLINICAL_WARNING}"
+
+
+def _run_phase3(
+    question: str, intent: dict[str, Any], client: ToolClient, trace: ToolTrace, warnings: list[str]
+) -> tuple[str, list[str], dict[str, Any] | None]:
+    """Execute the right Phase 3 tool(s), build an evidence card, reformulate."""
+
+    kind = intent["intent"]
+    variable = intent.get("variable_name")
+    age_group = intent.get("age_group")
+    time_window = intent.get("time_window")
+    metric = intent.get("metric")
+    evidence_card: dict[str, Any] | None = None
+
+    def _call(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return trace.record(name, args, lambda: client.call_tool(name, args))
+
+    if kind == "available_variables":
+        payload = _call("list_available_variables", {"variable_category": intent.get("variable_category")})
+    elif kind == "compare_age_groups":
+        payload = _call("compare_age_groups", {"variable_name": variable, "time_window": time_window, "metric": metric})
+        evidence_card = _call("generate_evidence_card", {
+            "variable_name": variable, "time_window": time_window,
+            "tool_name": "compare_age_groups", "main_metric": metric})
+    elif kind == "compare_time_windows":
+        payload = _call("compare_time_windows", {"variable_name": variable, "age_group": age_group, "metric": metric})
+        evidence_card = _call("generate_evidence_card", {
+            "variable_name": variable, "age_group": age_group,
+            "tool_name": "compare_time_windows", "main_metric": metric})
+    elif kind == "variable_summary":
+        payload = _call("get_variable_summary", {
+            "variable_name": variable, "age_group": age_group, "time_window": time_window})
+        evidence_card = _call("generate_evidence_card", {
+            "variable_name": variable, "age_group": age_group, "time_window": time_window,
+            "tool_name": "get_variable_summary", "main_metric": metric})
+    else:  # cohort_statistics
+        payload = _call("query_cohort_statistics", {
+            "variable_name": variable, "age_group": age_group, "time_window": time_window, "metric": metric})
+        evidence_card = _call("generate_evidence_card", {
+            "variable_name": variable, "age_group": age_group, "time_window": time_window,
+            "tool_name": "query_cohort_statistics", "main_metric": metric})
+
+    sources_used = [payload["source"]] if isinstance(payload, dict) and payload.get("source") else []
+    if isinstance(payload, dict) and payload.get("error"):
+        warnings.append(payload["error"])
+
+    llm_answer, warning = _call_llm(_phase3_prompt(question, kind, payload, evidence_card))
+    if warning:
+        warnings.append(warning)
+        answer = _phase3_deterministic_answer(kind, payload, evidence_card)
+    else:
+        answer = llm_answer
+    return answer, sources_used, evidence_card
 
 
 def _safe_retrieve_context(
@@ -269,15 +505,40 @@ def _run_agent_with_client(
     warnings: list[str],
 ) -> dict[str, Any]:
     trace = ToolTrace(backend=client.name)
+
+    # Safety gate FIRST (deterministic, never depends on the LLM): a diagnosis /
+    # treatment request is refused non-clinically before any data tool runs.
+    safety = trace.record(
+        "detect_clinical_advice_request", {"question": question},
+        lambda: client.call_tool("detect_clinical_advice_request", {"question": question}),
+    )
+    clinical_refused = bool(isinstance(safety, dict) and safety.get("is_clinical_advice"))
+
     context = infer_patient_context(question)
-    question_type, missing_fields = _classify(question, context)
-    # A purely arithmetic question routes to the calculator tool, not the RAG/MIMIC
-    # tools. Only override non-patient classifications so patient questions win.
+    base_type, missing_fields = _classify(question, context)
+    question_type = base_type
+
+    phase3_intent: dict[str, Any] | None = None
     calc_expression: str | None = None
-    if question_type in {"concept_question", "dataset_question", "pipeline_question"}:
-        calc_expression = _extract_calculation(question)
-        if calc_expression:
-            question_type = "calculator_question"
+    if clinical_refused:
+        question_type = "clinical_advice_refused"
+    else:
+        phase3_intent = _infer_phase3_intent(question)
+        if phase3_intent and _is_strong_phase3(question):
+            # A strong multi-variable signal overrides patient/concept routing.
+            question_type = "phase3_" + phase3_intent["intent"]
+        elif base_type in {"concept_question", "dataset_question", "pipeline_question"}:
+            # Within the generic path, a (weaker) Phase 3 intent still wins over
+            # RAG; otherwise a purely arithmetic question routes to the calculator.
+            if phase3_intent:
+                question_type = "phase3_" + phase3_intent["intent"]
+            else:
+                phase3_intent = None
+                calc_expression = _extract_calculation(question)
+                if calc_expression:
+                    question_type = "calculator_question"
+        else:
+            phase3_intent = None  # keep patient/unsupported routing untouched
     patient_context = {
         "is_patient_value_question": context.get("is_patient_value_question"),
         "age": context.get("age"),
@@ -288,8 +549,16 @@ def _run_agent_with_client(
     }
     sources_used: list[str] = []
     answer = ""
+    evidence_card: dict[str, Any] | None = None
 
-    if question_type == "patient_value_question":
+    if question_type == "clinical_advice_refused":
+        answer = safety.get("refusal_message", CLINICAL_WARNING) + f"\n\n{CLINICAL_WARNING}"
+
+    elif question_type.startswith("phase3_"):
+        answer, sources_used, evidence_card = _run_phase3(
+            question, phase3_intent, client, trace, warnings)
+
+    elif question_type == "patient_value_question":
         vital_sign = context["vital_sign"]
         age_group = context["age_group"]
         time_window = context["time_window"]
@@ -437,6 +706,7 @@ def _run_agent_with_client(
         "question_type": question_type,
         "answer": answer,
         "patient_context": patient_context,
+        "evidence_card": evidence_card,
         "sources_used": sources_used,
         "tool_backend": client.name,
         "tool_trace": trace.as_list(),

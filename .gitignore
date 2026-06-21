@@ -8,7 +8,11 @@
 
 # Données sensibles (MIMIC)
 data/raw/
-data/processed/
+# Everything under data/processed/ is gitignored (sensitive MIMIC-derived data),
+# EXCEPT the aggregated, non-patient-level Phase 3 artifacts re-included below.
+data/processed/*
+!data/processed/icu_variable_dictionary.csv
+!data/processed/icu_feature_summary.csv
 data/*.csv
 data/*.csv.gz
 

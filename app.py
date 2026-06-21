@@ -21,9 +21,14 @@ from src.semantic_rag import (
 
 PHASE_1 = "Phase 1 — Semantic RAG Explorer"
 PHASE_2 = "Phase 2 — Agentic RAG with Tools"
+PHASE_3 = "Phase 3 — ICU Multi-Data Explorer"
 
 PHASE_1_DESC = "Retrieves relevant chunks from ChromaDB and generates a grounded answer."
 PHASE_2_DESC = "Uses a single LLM agent to call deterministic tools before generating the final answer."
+PHASE_3_DESC = (
+    "Same single agent over 25 MIMIC-IV ICU variables (labs + charted): lists variables, "
+    "summarizes one, compares age groups / time windows, and returns an evidence card."
+)
 
 NON_CLINICAL_WARNING = (
     "This response is for academic interpretation only and is not a clinical diagnosis "
@@ -48,6 +53,17 @@ CONCEPT_QUESTIONS = [
 CALCULATOR_QUESTIONS = [
     "What is 104 * 2?",
     "If the value is 104 and we add 10, what is the result?",
+]
+PHASE3_QUESTIONS = [
+    "What variables are available?",
+    "What labs are available?",
+    "Summarize lactate for patients aged 75-84 in the first 24h.",
+    "Compare creatinine across age groups in first_24h.",
+    "Compare MAP across time windows for patients aged 75-84.",
+    "Show heart_rate statistics for age group 85+ in first_6h.",
+    "Which age group has the highest median lactate in first_24h?",
+    "What is the p90 of respiratory_rate for 65-74 in first_12h?",
+    "Should this patient receive treatment for high lactate?",
 ]
 SAMPLE_QUESTIONS = PATIENT_QUESTIONS + CONCEPT_QUESTIONS + CALCULATOR_QUESTIONS
 
@@ -244,11 +260,14 @@ if "question" not in st.session_state:
 st.sidebar.markdown("### Pipeline mode")
 mode = st.sidebar.radio(
     "Choose the pipeline",
-    [PHASE_1, PHASE_2],
+    [PHASE_1, PHASE_2, PHASE_3],
     label_visibility="collapsed",
 )
 is_phase2 = mode == PHASE_2
-st.sidebar.caption(PHASE_2_DESC if is_phase2 else PHASE_1_DESC)
+is_phase3 = mode == PHASE_3
+is_phase1 = mode == PHASE_1
+uses_agent = is_phase2 or is_phase3
+st.sidebar.caption({PHASE_1: PHASE_1_DESC, PHASE_2: PHASE_2_DESC, PHASE_3: PHASE_3_DESC}[mode])
 
 demo_friendly = st.sidebar.toggle(
     "Demo-friendly display",
@@ -262,8 +281,8 @@ TOOL_BACKEND_LABELS = {
     "MCP remote backend": "mcp_remote",
 }
 tool_backend = "local"
-if is_phase2:
-    with st.sidebar.expander("Advanced settings (Phase 2)", expanded=False):
+if uses_agent:
+    with st.sidebar.expander("Advanced settings (agent backend)", expanded=False):
         backend_label = st.radio(
             "Tool execution backend",
             list(TOOL_BACKEND_LABELS),
@@ -285,6 +304,7 @@ suggested_options = (
     + [(f"Patient · {q}", q) for q in PATIENT_QUESTIONS]
     + [(f"Concept · {q}", q) for q in CONCEPT_QUESTIONS]
     + [(f"Calculator · {q}", q) for q in CALCULATOR_QUESTIONS]
+    + [(f"Phase 3 · {q}", q) for q in PHASE3_QUESTIONS]
 )
 suggested_labels = [label for label, _ in suggested_options]
 suggested_map = dict(suggested_options)
@@ -309,7 +329,7 @@ time_window_filter = st.sidebar.selectbox("Time window", ["All", "first_6h", "fi
 
 run_col, reset_col = st.sidebar.columns(2)
 ask_clicked = run_col.button(
-    "Run agent" if is_phase2 else "Run retrieval", type="primary", use_container_width=True
+    "Run agent" if uses_agent else "Run retrieval", type="primary", use_container_width=True
 )
 reset_clicked = reset_col.button("Reset", use_container_width=True)
 if reset_clicked:
@@ -326,7 +346,11 @@ for label, (ok, detail) in _system_status().items():
 # Hero / summary banner
 # --------------------------------------------------------------------------- #
 
-mode_badge = "Phase 2 — Agentic RAG" if is_phase2 else "Phase 1 — Semantic RAG"
+mode_badge = {
+    PHASE_1: "Phase 1 — Semantic RAG",
+    PHASE_2: "Phase 2 — Agentic RAG",
+    PHASE_3: "Phase 3 — ICU Multi-Data Explorer",
+}[mode]
 st.markdown(
     f"""
     <div class="hero">
@@ -360,7 +384,7 @@ st.session_state.question = question
 # Phase 1 — Semantic RAG
 # --------------------------------------------------------------------------- #
 
-if ask_clicked and not is_phase2:
+if ask_clicked and is_phase1:
     with st.spinner("Retrieving local chunks..."):
         try:
             retrieved = retrieve_semantic_chunks(
@@ -652,6 +676,146 @@ elif ask_clicked and is_phase2:
         "This mode uses a single LLM agent to orchestrate deterministic tools. The RAG retrieves knowledge, "
         "while tools perform data availability checks, threshold comparisons and percentile comparisons. "
         "The final answer is grounded and auditable through the tool trace."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — ICU Multi-Data Explorer (same agent, multi-variable tools)
+# --------------------------------------------------------------------------- #
+
+elif ask_clicked and is_phase3:
+    with st.spinner("Running the ICU Multi-Data agent (deterministic tools + grounded LLM)..."):
+        agent_result = run_agent(question, top_k=top_k, tool_backend=tool_backend)
+
+    trace = agent_result.get("tool_trace", [])
+    warnings = agent_result.get("warnings", [])
+    trace_by_name = {entry.get("tool_name"): entry for entry in trace}
+    qtype = str(agent_result.get("question_type", ""))
+    evidence_card = agent_result.get("evidence_card")
+
+    st.markdown("### Final answer")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(_strip_warning(agent_result.get("answer", "")))
+    st.caption("Descriptive, non-clinical. Grounded in `icu_feature_summary.csv` via deterministic tools.")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.warning(NON_CLINICAL_WARNING)
+    for warning in warnings:
+        st.warning(warning)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Question type", qtype)
+    metric_cols[1].metric("Tools called", len(agent_result.get("tools_called", [])))
+    metric_cols[2].metric("Tool success", f"{agent_result.get('tool_call_success_rate', 0.0) * 100:.0f}%")
+    metric_cols[3].metric("Tool backend", str(agent_result.get("tool_backend", "local")))
+
+    def _p3_output(name: str):
+        entry = trace_by_name.get(name)
+        if entry is not None and entry.get("status") == "success":
+            return entry.get("outputs")
+        return None
+
+    if qtype == "clinical_advice_refused":
+        st.error("Clinical-advice request refused: this tool is descriptive and non-clinical only.")
+
+    if isinstance(evidence_card, dict) and not evidence_card.get("error"):
+        st.markdown("### Evidence card")
+        _kv_table([
+            ("Variable", evidence_card.get("variable")),
+            ("Category", evidence_card.get("category")),
+            ("Source table", evidence_card.get("source_table")),
+            ("Itemids", evidence_card.get("itemids")),
+            ("Unit", evidence_card.get("unit")),
+            ("Age group", evidence_card.get("age_group")),
+            ("Time window", evidence_card.get("time_window")),
+            ("N patients", evidence_card.get("n_patients")),
+            ("N measurements", evidence_card.get("n_measurements")),
+            ("Main metric", evidence_card.get("main_metric")),
+            ("Missing rate warning", evidence_card.get("missing_rate_warning")),
+        ])
+
+    avail = _p3_output("list_available_variables")
+    if avail and avail.get("variables"):
+        st.markdown("### Available ICU variables")
+        st.dataframe(pd.DataFrame(avail["variables"]), width="stretch", hide_index=True)
+
+    vsum = _p3_output("get_variable_summary")
+    if vsum and not vsum.get("error"):
+        st.markdown("### Variable summary")
+        _kv_table([
+            ("Variable", vsum.get("variable_name")), ("Unit", vsum.get("unit")),
+            ("Age group", vsum.get("age_group")), ("Time window", vsum.get("time_window")),
+            ("N patients", vsum.get("n_patients")), ("N measurements", vsum.get("n_measurements")),
+            ("Mean", vsum.get("mean")), ("Std", vsum.get("std")), ("Median", vsum.get("median")),
+            ("P05", vsum.get("p05")), ("P25", vsum.get("p25")), ("P75", vsum.get("p75")),
+            ("P90", vsum.get("p90")), ("P95", vsum.get("p95")), ("Missing rate", vsum.get("missing_rate")),
+        ])
+
+    cag = _p3_output("compare_age_groups")
+    if cag and not cag.get("error"):
+        st.markdown("### Comparison across age groups")
+        metric_name = cag.get("metric", "value")
+        chart_df = pd.DataFrame(
+            [{"age_group": k, metric_name: v} for k, v in cag.get("values_by_age_group", {}).items() if v is not None]
+        )
+        if not chart_df.empty:
+            st.bar_chart(chart_df.set_index("age_group"))
+            st.dataframe(chart_df, width="stretch", hide_index=True)
+        st.caption(cag.get("descriptive", ""))
+
+    ctw = _p3_output("compare_time_windows")
+    if ctw and not ctw.get("error"):
+        st.markdown("### Comparison across time windows")
+        metric_name = ctw.get("metric", "value")
+        chart_df = pd.DataFrame(
+            [{"time_window": k, metric_name: v} for k, v in ctw.get("values_by_time_window", {}).items() if v is not None]
+        )
+        if not chart_df.empty:
+            st.bar_chart(chart_df.set_index("time_window"))
+            st.dataframe(chart_df, width="stretch", hide_index=True)
+        st.caption(f"Trend: {ctw.get('trend')} — {ctw.get('descriptive', '')}")
+
+    cohort = _p3_output("query_cohort_statistics")
+    if cohort and cohort.get("rows"):
+        st.markdown("### Cohort statistics")
+        st.dataframe(pd.DataFrame(cohort["rows"]), width="stretch", hide_index=True)
+
+    st.markdown("### Agent tool trace")
+    if trace:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Step": entry.get("step"),
+                    "Tool name": entry.get("tool_name"),
+                    "Backend": entry.get("backend", "local"),
+                    "Status": entry.get("status"),
+                    "Latency (ms)": entry.get("latency_ms"),
+                    "Input summary": _short(entry.get("inputs", {})),
+                    "Output summary": _short(entry.get("outputs_summary", "")),
+                }
+                for entry in trace
+            ]),
+            width="stretch", hide_index=True,
+        )
+        for entry in trace:
+            with st.expander(
+                f"Step {entry.get('step')} — {entry.get('tool_name')} — raw input/output",
+                expanded=not demo_friendly,
+            ):
+                st.markdown("**Input**")
+                st.json(entry.get("inputs", {}))
+                st.markdown("**Output**")
+                st.json(entry.get("outputs", {}))
+    else:
+        st.info("No tools were called for this question.")
+
+    if agent_result.get("trace_file"):
+        st.caption(f"Auditable trace saved to {agent_result['trace_file']}")
+
+    st.markdown("### Why this is Phase 3")
+    st.info(
+        "This mode reuses the SAME single agent, tool client and auditable trace as Phase 2, but over "
+        "25 MIMIC-IV ICU variables (13 labs + 12 charted). All tools are deterministic and descriptive; "
+        "the agent refuses diagnosis/treatment requests via a non-clinical safety gate."
     )
 
 

@@ -329,3 +329,155 @@ alarming language ("critical", "dangerous", "emergency"); they report position
 relative to reference thresholds and percentiles only. Missing data is reported,
 never fabricated, and a value is never compared against another vital sign's
 distribution.
+
+## Phase 3 — ICU Multi-Data Explorer
+
+Phase 3 turns the single Phase 2 agent into an **ICU Multi-Data Explorer**: the
+**same** agent, tool client and auditable trace, now over **25 MIMIC-IV ICU
+variables** instead of the seven vital signs. It is still a single agent,
+descriptive, and **non-clinical**.
+
+- **Objective:** explore many ICU variable families (labs + charted) with
+  deterministic, auditable, descriptive statistics — never diagnosis or treatment.
+- **Data — 25 variables:**
+  - **13 labs:** lactate, creatinine, bilirubin_total, platelets, wbc,
+    hemoglobin, sodium, potassium, bicarbonate, ph_blood, pao2, paco2, inr.
+  - **12 charted:** heart_rate, respiratory_rate, map, sbp, dbp, temperature,
+    spo2, glucose, fio2, o2_flow, gcs_total, cvp.
+- **Main file (committable):** `data/processed/icu_feature_summary.csv` —
+  aggregated, one row per variable × age group (`65-74/75-84/85+`) × time window
+  (`first_6h/12h/24h`), with `n_patients, n_measurements, mean, std, min, max,
+  median, p05, p25, p50, p75, p90, p95, missing_rate`.
+- **Patient-level file (gitignored, never committed):**
+  `data/processed/icu_patient_features.csv`.
+- **Variable dictionary (committable):** `data/processed/icu_variable_dictionary.csv`
+  documents every variable's `source_table`, `itemids`, `unit`, inclusion and
+  cleaning rules (generated from `src/icu_variables.py`, the single source of truth).
+
+### Phase 3 tools (`src/tools/icu_feature_tools.py`)
+
+| Tool | Job |
+| --- | --- |
+| `list_available_variables` | List variables (optionally by category) with unit, source_table, itemids, available age groups / windows. |
+| `get_variable_summary` | Exact descriptive stats for one variable × age group × time window. |
+| `query_cohort_statistics` | Descriptive query on a variable, optional age group / window / metric. |
+| `compare_age_groups` | Compare a variable across 65-74/75-84/85+ for a fixed window (values, highest/lowest, spread). |
+| `compare_time_windows` | Compare a variable across first_6h/12h/24h for a fixed age group (values + trend). |
+| `generate_evidence_card` | Structured, sourced, non-clinical evidence card. |
+| `plot_variable_distribution` | Bar-chart payload (median/p90 by age group or window); **no fabricated histogram**. |
+| `detect_clinical_advice_request` | **Safety gate**: flags diagnosis/treatment requests so the agent refuses them. |
+
+All tools are deterministic, JSON-serializable, read `icu_feature_summary.csv`,
+and are exposed through the **same** local and MCP-remote backends as Phase 2
+(shared registry now totals **16 tools**).
+
+### Evidence card & safety gate
+
+- **Evidence card:** every Phase 3 data answer returns a card with `variable`,
+  `category`, `source_table`, `itemids`, `unit`, `age_group`, `time_window`,
+  `n_patients`, `n_measurements`, `main_metric`, a `missing_rate_warning`, and a
+  non-clinical note.
+- **Safety gate:** a deterministic check runs **first** on every question. A
+  diagnosis/treatment request ("what treatment", "should we give", "diagnose"…)
+  is **refused non-clinically** before any data tool runs.
+
+### Phase 3 example questions
+
+- What variables are available?
+- What labs are available?
+- Summarize lactate for patients aged 75-84 in the first 24h.
+- Compare creatinine across age groups in first_24h.
+- Compare MAP across time windows for patients aged 75-84.
+- Which age group has the highest median lactate in first_24h?
+- What is the p90 of respiratory_rate for 65-74 in first_12h?
+- Should this patient receive treatment for high lactate?  → **refused, non-clinical**.
+
+### Launch & evaluation commands
+
+```bash
+# Ollama running with the models pulled
+ollama serve &
+ollama pull bge-m3:latest && ollama pull qwen2.5:14b
+
+# Run the app, then pick "Phase 3 — ICU Multi-Data Explorer" in the sidebar
+streamlit run app.py
+
+# Evaluate Phase 3 (10 scenarios) -> data/evaluation/phase3_*.{csv,md} (gitignored)
+python -m src.evaluate_phase3 --backend local
+
+# Phase 2 still passes unchanged
+python -m src.evaluate_agent --backend local
+```
+
+Rebuilding the feature table (BigQuery, optional, **capped & cost-guarded** — not
+needed to demo, the committed `icu_feature_summary.csv` is enough):
+
+```bash
+python -m src.icu_variables                                      # (re)write the variable dictionary
+python -m src.validate_icu_itemids                               # confirm itemids vs d_items/d_labitems (light)
+python -m src.extract_icu_features --family labs --dry-run       # show generated SQL, run nothing
+python -m src.extract_icu_features --family labs --estimate-cost # FREE BigQuery byte estimate
+python -m src.extract_icu_features --family labs --sample 200    # real, limited run (per-query cap 5 GB)
+```
+
+### Demo script (5 questions)
+
+1. Start Ollama (`ollama serve`) and the app (`streamlit run app.py`).
+2. In the sidebar, select **Phase 3 — ICU Multi-Data Explorer**.
+3. Ask each question and point at the indicated panels:
+
+| # | Question | What to show |
+| --- | --- | --- |
+| 1 | What variables are available? | Final answer + the **Available ICU variables** table (25 vars). Tool: `list_available_variables`. |
+| 2 | Summarize lactate for patients aged 75-84 in the first 24h. | Final answer + **evidence card** + **variable-summary** stats table. Tool: `get_variable_summary`. |
+| 3 | Compare creatinine across age groups in first_24h. | **Bar chart** across age groups + evidence card. Tool: `compare_age_groups`. |
+| 4 | Compare MAP across time windows for patients aged 75-84. | **Bar chart** across windows + trend + evidence card. Tool: `compare_time_windows`. |
+| 5 | Should this patient receive treatment for high lactate? | **Safety refusal** (no data tool called) + non-clinical warning. Tool: `detect_clinical_advice_request`. |
+
+For every question, the **Agent tool trace** panel shows the tools called, their
+inputs/outputs, latency and backend — the auditable record (also saved to
+`data/agent_traces/`).
+
+### Phase 3 presentation slides
+
+**Slide 1 — Why Phase 3?**
+- Phase 1/2 only covered 7 vital signs; clinicians and researchers reason over labs,
+  interventions and outcomes too.
+- Phase 3 generalizes the *same* single agent to many ICU variable families — still
+  descriptive, auditable, non-clinical.
+- *Oral:* "Phase 3 keeps the exact Phase 2 architecture but widens the data, from 7
+  vital signs to 25 ICU variables."
+
+**Slide 2 — Enriched data: 25 ICU variables**
+- 13 labs + 12 charted, by age group (65-74/75-84/85+) and time window (6h/12h/24h).
+- One committable table `icu_feature_summary.csv`; patient-level stays gitignored.
+- Every variable documented (source table, itemids, unit) in a data dictionary.
+- *Oral:* "We extracted, cleaned and aggregated 25 variables from MIMIC-IV, with full
+  provenance and safe-bound filtering."
+
+**Slide 3 — New Phase 3 tools**
+- 8 deterministic tools: list / summarize / compare age groups / compare time windows
+  / cohort stats / evidence card / bar charts / clinical-advice safety gate.
+- Same `ToolClient` + MCP registry as Phase 2 (16 tools, local or remote).
+- *Oral:* "The LLM never computes — eight deterministic tools do, and every call is
+  traced; a safety gate refuses any treatment or diagnosis request."
+
+**Slide 4 — Demo, evaluation & limits**
+- Live demo: 5 questions (variables → summary → compare → safety refusal).
+- Evaluation: Phase 3 **10/10**, Phase 2 still **5/5** (no regression).
+- Limits: sample-capped extraction (missing_rate = sample coverage), descriptive only,
+  non-clinical by construction.
+- *Oral:* "It is evaluated and stable; it is an academic explorer, not a clinical tool."
+
+### Phase 3 limitations
+
+- The feature table is built from a **capped sample** (per-itemid row cap /
+  `--sample`), so **`missing_rate` reflects sample coverage, not true population
+  missingness**, and `n_patients` is the count within the sampled rows. The labs in
+  the shipped table were extracted with `--sample 200` (high `missing_rate`); the
+  charted variables with the default cap (lower, more representative).
+- **Descriptive statistics only — no diagnosis, no treatment, no clinical use.**
+- The bar charts visualize **aggregates** (median/p90); they are not per-value
+  histograms (the summary stores aggregates, not raw values).
+- Outcomes beyond ICU/hospital LOS (categorical admission type, mortality rate) are
+  deferred and not part of the shipped table.
