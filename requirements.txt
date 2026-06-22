@@ -15,7 +15,8 @@ openai
 # Install it to run the real MCP network backend: the streamable-http server
 # (src/server_mcp.py) and the remote client backend (mcp_remote).
 mcp
-fastmcp# Phase 3+: LangGraph state-graph engine for the Phase 3 role-based workflow
+fastmcp
+# Phase 3+: LangGraph state-graph engine for the Phase 3 role-based workflow
 # (src/phase3_graph_agent.py). OPTIONAL — the classic agent (src/agent.py) runs
 # without it; the graph engine degrades gracefully if langgraph is missing.
 langgraph
