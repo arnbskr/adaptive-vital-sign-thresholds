@@ -335,3 +335,252 @@ alarming language ("critical", "dangerous", "emergency"); they report position
 relative to reference thresholds and percentiles only. Missing data is reported,
 never fabricated, and a value is never compared against another vital sign's
 distribution.
+
+## Phase 3 — ICU Multi-Data Explorer
+
+Phase 3 turns the single Phase 2 agent into an **ICU Multi-Data Explorer**: the
+**same** agent, tool client and auditable trace, now over **25 MIMIC-IV ICU
+variables** instead of the seven vital signs. It is still a single agent,
+descriptive, and **non-clinical**.
+
+- **Objective:** explore many ICU variable families (labs + charted) with
+  deterministic, auditable, descriptive statistics — never diagnosis or treatment.
+- **Data — 25 variables:**
+  - **13 labs:** lactate, creatinine, bilirubin_total, platelets, wbc,
+    hemoglobin, sodium, potassium, bicarbonate, ph_blood, pao2, paco2, inr.
+  - **12 charted:** heart_rate, respiratory_rate, map, sbp, dbp, temperature,
+    spo2, glucose, fio2, o2_flow, gcs_total, cvp.
+- **Main file (committable):** `data/processed/icu_feature_summary.csv` —
+  aggregated, one row per variable × age group (`65-74/75-84/85+`) × time window
+  (`first_6h/12h/24h`), with `n_patients, n_measurements, mean, std, min, max,
+  median, p05, p25, p50, p75, p90, p95, missing_rate`.
+- **Patient-level file (gitignored, never committed):**
+  `data/processed/icu_patient_features.csv`.
+- **Variable dictionary (committable):** `data/processed/icu_variable_dictionary.csv`
+  documents every variable's `source_table`, `itemids`, `unit`, inclusion and
+  cleaning rules (generated from `src/icu_variables.py`, the single source of truth).
+
+### Phase 3 tools (`src/tools/icu_feature_tools.py`)
+
+| Tool | Job |
+| --- | --- |
+| `list_available_variables` | List variables (optionally by category) with unit, source_table, itemids, available age groups / windows. |
+| `get_variable_summary` | Exact descriptive stats for one variable × age group × time window. |
+| `query_cohort_statistics` | Descriptive query on a variable, optional age group / window / metric. |
+| `compare_age_groups` | Compare a variable across 65-74/75-84/85+ for a fixed window (values, highest/lowest, spread). |
+| `compare_time_windows` | Compare a variable across first_6h/12h/24h for a fixed age group (values + trend). |
+| `generate_evidence_card` | Structured, sourced, non-clinical evidence card. |
+| `plot_variable_distribution` | Bar-chart payload (median/p90 by age group or window); **no fabricated histogram**. |
+| `detect_clinical_advice_request` | **Safety gate**: flags diagnosis/treatment requests so the agent refuses them. |
+
+All tools are deterministic, JSON-serializable, read `icu_feature_summary.csv`,
+and are exposed through the **same** local and MCP-remote backends as Phase 2
+(shared registry now totals **16 tools**).
+
+### Evidence card & safety gate
+
+- **Evidence card:** every Phase 3 data answer returns a card with `variable`,
+  `category`, `source_table`, `itemids`, `unit`, `age_group`, `time_window`,
+  `n_patients`, `n_measurements`, `main_metric`, a `missing_rate_warning`, and a
+  non-clinical note.
+- **Safety gate:** a deterministic check runs **first** on every question. A
+  diagnosis/treatment request ("what treatment", "should we give", "diagnose"…)
+  is **refused non-clinically** before any data tool runs.
+
+### Phase 3 example questions
+
+- What variables are available?
+- What labs are available?
+- Summarize lactate for patients aged 75-84 in the first 24h.
+- Compare creatinine across age groups in first_24h.
+- Compare MAP across time windows for patients aged 75-84.
+- Which age group has the highest median lactate in first_24h?
+- What is the p90 of respiratory_rate for 65-74 in first_12h?
+- Should this patient receive treatment for high lactate?  → **refused, non-clinical**.
+
+### Launch & evaluation commands
+
+```bash
+# Ollama running with the models pulled
+ollama serve &
+ollama pull bge-m3:latest && ollama pull qwen2.5:14b
+
+# Run the app, then pick "Phase 3 — ICU Multi-Data Explorer" in the sidebar
+streamlit run app.py
+
+# Evaluate Phase 3 (10 scenarios) -> data/evaluation/phase3_*.{csv,md} (gitignored)
+python -m src.evaluate_phase3 --backend local
+
+# Phase 2 still passes unchanged
+python -m src.evaluate_agent --backend local
+```
+
+Rebuilding the feature table (BigQuery, optional, **capped & cost-guarded** — not
+needed to demo, the committed `icu_feature_summary.csv` is enough):
+
+```bash
+python -m src.icu_variables                                      # (re)write the variable dictionary
+python -m src.validate_icu_itemids                               # confirm itemids vs d_items/d_labitems (light)
+python -m src.extract_icu_features --family labs --dry-run       # show generated SQL, run nothing
+python -m src.extract_icu_features --family labs --estimate-cost # FREE BigQuery byte estimate
+python -m src.extract_icu_features --family labs --sample 200    # real, limited run (per-query cap 5 GB)
+```
+
+### Demo script (5 questions)
+
+1. Start Ollama (`ollama serve`) and the app (`streamlit run app.py`).
+2. In the sidebar, select **Phase 3 — ICU Multi-Data Explorer**.
+3. Ask each question and point at the indicated panels:
+
+| # | Question | What to show |
+| --- | --- | --- |
+| 1 | What variables are available? | Final answer + the **Available ICU variables** table (25 vars). Tool: `list_available_variables`. |
+| 2 | Summarize lactate for patients aged 75-84 in the first 24h. | Final answer + **evidence card** + **variable-summary** stats table. Tool: `get_variable_summary`. |
+| 3 | Compare creatinine across age groups in first_24h. | **Bar chart** across age groups + evidence card. Tool: `compare_age_groups`. |
+| 4 | Compare MAP across time windows for patients aged 75-84. | **Bar chart** across windows + trend + evidence card. Tool: `compare_time_windows`. |
+| 5 | Should this patient receive treatment for high lactate? | **Safety refusal** (no data tool called) + non-clinical warning. Tool: `detect_clinical_advice_request`. |
+
+For every question, the **Agent tool trace** panel shows the tools called, their
+inputs/outputs, latency and backend — the auditable record (also saved to
+`data/agent_traces/`).
+
+### Phase 3 presentation slides
+
+**Slide 1 — Why Phase 3?**
+- Phase 1/2 only covered 7 vital signs; clinicians and researchers reason over labs,
+  interventions and outcomes too.
+- Phase 3 generalizes the *same* single agent to many ICU variable families — still
+  descriptive, auditable, non-clinical.
+- *Oral:* "Phase 3 keeps the exact Phase 2 architecture but widens the data, from 7
+  vital signs to 25 ICU variables."
+
+**Slide 2 — Enriched data: 25 ICU variables**
+- 13 labs + 12 charted, by age group (65-74/75-84/85+) and time window (6h/12h/24h).
+- One committable table `icu_feature_summary.csv`; patient-level stays gitignored.
+- Every variable documented (source table, itemids, unit) in a data dictionary.
+- *Oral:* "We extracted, cleaned and aggregated 25 variables from MIMIC-IV, with full
+  provenance and safe-bound filtering."
+
+**Slide 3 — New Phase 3 tools**
+- 8 deterministic tools: list / summarize / compare age groups / compare time windows
+  / cohort stats / evidence card / bar charts / clinical-advice safety gate.
+- Same `ToolClient` + MCP registry as Phase 2 (16 tools, local or remote).
+- *Oral:* "The LLM never computes — eight deterministic tools do, and every call is
+  traced; a safety gate refuses any treatment or diagnosis request."
+
+**Slide 4 — Demo, evaluation & limits**
+- Live demo: 5 questions (variables → summary → compare → safety refusal).
+- Evaluation: Phase 3 **10/10**, Phase 2 still **5/5** (no regression).
+- Limits: sample-capped extraction (missing_rate = sample coverage), descriptive only,
+  non-clinical by construction.
+- *Oral:* "It is evaluated and stable; it is an academic explorer, not a clinical tool."
+
+### Phase 3 limitations
+
+- The feature table is built from a **capped sample** (per-itemid row cap /
+  `--sample`), so **`missing_rate` reflects sample coverage, not true population
+  missingness**, and `n_patients` is the count within the sampled rows. The labs in
+  the shipped table were extracted with `--sample 200` (high `missing_rate`); the
+  charted variables with the default cap (lower, more representative).
+- **Descriptive statistics only — no diagnosis, no treatment, no clinical use.**
+- The bar charts visualize **aggregates** (median/p90); they are not per-value
+  histograms (the summary stores aggregates, not raw values).
+- Outcomes beyond ICU/hospital LOS (categorical admission type, mortality rate) are
+  deferred and not part of the shipped table.
+
+## Phase 3+ — LangGraph, Grounding Validator and Controlled Memory
+
+Phase 3+ hardens the Phase 3 explorer along three axes from the course, **without
+changing what the system does** (same deterministic tools, same non-clinical
+guarantees, same evaluation). It lives on the `phase3-langgraph-memory-grounding`
+branch.
+
+### 1. LangGraph as the Phase 3 architecture (`src/phase3_graph_agent.py`)
+
+The Phase 3 workflow is expressed as an explicit **LangGraph `StateGraph`** with a
+typed state (`Phase3GraphState`) and six **role-based nodes**:
+
+```text
+START
+  → safety_agent     (detect_clinical_advice_request; refuse + stop if clinical)
+  → [conditional]    (refused → END ; else → intent)
+  → intent_agent     (resolve variable / age_group / time_window / metric; + session memory)
+  → data_agent       (call the right deterministic tool via ToolClient + ToolTrace)
+  → evidence_agent   (generate_evidence_card when relevant)
+  → answer_agent     (LLM reformulation; deterministic fallback; never invents numbers)
+  → grounding_agent  (validate_numeric_grounding over the tool trace)
+  → END
+```
+
+`answer` runs **before** `grounding` because grounding validates the numbers in the
+produced answer. Two execution engines coexist behind the same result shape:
+
+- **Classic** — the original procedural agent (`src/agent.py`), default-safe.
+- **LangGraph** — `run_phase3_graph_agent(...)`; if `langgraph` is not installed it
+  **falls back to the classic agent with a warning** (never crashes).
+
+```bash
+python -m src.phase3_graph_agent "Compare creatinine across age groups in first_24h."
+python -m src.phase3_graph_agent "Should this patient receive treatment for high lactate?"
+python -m src.evaluate_phase3 --backend local --engine classic     # 10/10
+python -m src.evaluate_phase3 --backend local --engine langgraph    # 10/10
+```
+
+In Streamlit (Phase 3 mode), *Phase 3 engine & memory* lets you pick the engine
+(LangGraph by default when available) and shows the **role nodes executed**.
+
+### 2. Numeric grounding validator (`src/grounding_validator.py`)
+
+A lightweight, deterministic guardrail (Cours 9 spirit): it collects every number
+in the recorded tool trace and checks that each number in the final answer is
+supported there, with simple rounding tolerance (`1.40` ≈ `1.4`), ignoring phase
+labels and years. It is **advisory** — it never blocks or rewrites the answer, it
+only adds a warning and a `grounding_validation` block to the result (and a panel in
+Streamlit). The Phase 3 evaluation includes a `numeric_grounding_ok` metric.
+
+### 3. Controlled session memory (`src/session_memory.py`)
+
+Session-only, **no long-term store, no patient-level data, no raw MIMIC values** —
+it keeps only the *last query context* (`last_variable`, `last_age_group`,
+`last_time_window`, `last_metric`, `last_intent`, `last_tool`). It rewrites simple
+follow-ups into full standalone questions the intent detector already understands:
+
+| Follow-up | Rewritten using memory |
+| --- | --- |
+| `What about creatinine?` | `Summarize creatinine for 75-84 in first_24h.` |
+| `And for 85+?` | `Summarize lactate for 85+ in first_24h.` |
+| `What about first_12h?` | `Summarize lactate for 75-84 in first_12h.` |
+| `Compare it across age groups.` | `Compare lactate across age groups in first_24h.` |
+| `Now p90?` | `What is the p90 of lactate for 75-84 in first_24h?` |
+
+Streamlit shows *"Using session context: …"* when memory is applied and offers a
+**Clear Phase 3 memory** button. Complete standalone questions are never rewritten.
+
+### Role-based "multi-agent" — what it is and is not
+
+The six nodes are a **role-based decomposition** (separation of responsibilities +
+auditability) implemented as LangGraph nodes. It is **not** an autonomous
+multi-agent debate, consensus, or swarm system: there is still **one** orchestrated
+flow, deterministic tools, and a single auditable trace.
+
+### What Phase 3+ deliberately does NOT do
+
+- **No real self-learning** — the system never modifies its own behavior from
+  feedback (see *Why no self-learning?* below).
+- **No autonomous multi-agent** — no debate/consensus/swarm.
+- **No patient-level memory** — session memory holds only last query *context*.
+- **No clinical use** — descriptive, non-clinical by construction.
+
+### Future Work — Why no self-learning?
+
+Self-modifying agents (reflection loops that rewrite prompts/policies from observed
+errors) were shown in class, but are **deliberately out of scope** here:
+
+- **ICU context & safety** — an academic, non-clinical tool must be predictable; a
+  system that silently changes its own behavior is the opposite of auditable.
+- **Stability for presentation** — deterministic tools + explicit evaluation give
+  reproducible results; self-modification would make runs non-reproducible.
+- **Auditability over autonomy** — we prefer an explicit evaluation suite
+  (`evaluate_phase3.py`) and a numeric grounding check to uncontrolled self-tuning.
+
+The chosen direction is **more control and traceability**, not more autonomy.

@@ -9,6 +9,8 @@ from src.agent import run_agent
 from src.config import EVALUATION_DIR
 from src.evaluate_retrieval import run_retrieval_evaluation
 from src.mcp_server import list_tools as list_agent_tools
+from src.phase3_graph_agent import is_langgraph_available, run_phase3_graph_agent
+from src.session_memory import resolve_followup_question, update_phase3_memory
 from src.semantic_rag import (
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -21,9 +23,14 @@ from src.semantic_rag import (
 
 PHASE_1 = "Phase 1 — Semantic RAG Explorer"
 PHASE_2 = "Phase 2 — Agentic RAG with Tools"
+PHASE_3 = "Phase 3 — ICU Multi-Data Explorer"
 
 PHASE_1_DESC = "Retrieves relevant chunks from ChromaDB and generates a grounded answer."
 PHASE_2_DESC = "Uses a single LLM agent to call deterministic tools before generating the final answer."
+PHASE_3_DESC = (
+    "Same single agent over 25 MIMIC-IV ICU variables (labs + charted): lists variables, "
+    "summarizes one, compares age groups / time windows, and returns an evidence card."
+)
 
 NON_CLINICAL_WARNING = (
     "This response is for academic interpretation only and is not a clinical diagnosis "
@@ -48,6 +55,17 @@ CONCEPT_QUESTIONS = [
 CALCULATOR_QUESTIONS = [
     "What is 104 * 2?",
     "If the value is 104 and we add 10, what is the result?",
+]
+PHASE3_QUESTIONS = [
+    "What variables are available?",
+    "What labs are available?",
+    "Summarize lactate for patients aged 75-84 in the first 24h.",
+    "Compare creatinine across age groups in first_24h.",
+    "Compare MAP across time windows for patients aged 75-84.",
+    "Show heart_rate statistics for age group 85+ in first_6h.",
+    "Which age group has the highest median lactate in first_24h?",
+    "What is the p90 of respiratory_rate for 65-74 in first_12h?",
+    "Should this patient receive treatment for high lactate?",
 ]
 SAMPLE_QUESTIONS = PATIENT_QUESTIONS + CONCEPT_QUESTIONS + CALCULATOR_QUESTIONS
 
@@ -244,44 +262,47 @@ if "question" not in st.session_state:
 st.sidebar.markdown("### Pipeline mode")
 mode = st.sidebar.radio(
     "Choose the pipeline",
-    [PHASE_1, PHASE_2],
+    [PHASE_1, PHASE_2, PHASE_3],
     label_visibility="collapsed",
 )
 is_phase2 = mode == PHASE_2
-st.sidebar.caption(PHASE_2_DESC if is_phase2 else PHASE_1_DESC)
+is_phase3 = mode == PHASE_3
+is_phase1 = mode == PHASE_1
+uses_agent = is_phase2 or is_phase3
+st.sidebar.caption({PHASE_1: PHASE_1_DESC, PHASE_2: PHASE_2_DESC, PHASE_3: PHASE_3_DESC}[mode])
 
-demo_friendly = st.sidebar.toggle(
-    "Demo-friendly display",
-    value=True,
-    help="ON: cards, short tables and explanations, raw JSON tucked into expanders. "
-    "OFF: more technical detail expanded for debugging.",
-)
-
-TOOL_BACKEND_LABELS = {
-    "Local backend": "local",
-    "MCP remote backend": "mcp_remote",
-}
-tool_backend = "local"
-if is_phase2:
-    with st.sidebar.expander("Advanced settings (Phase 2)", expanded=False):
-        backend_label = st.radio(
-            "Tool execution backend",
-            list(TOOL_BACKEND_LABELS),
-            captions=[
-                "Runs tools in-process. Stable default mode.",
-                "Calls the same tools through a real MCP HTTP server.",
-            ],
+# Phase 3 engine & memory (Phase 3 only) — kept near the top for the demo.
+phase3_engine = "classic"
+if is_phase3:
+    with st.sidebar.expander("Phase 3 engine & memory", expanded=True):
+        _lg_ok = is_langgraph_available()
+        engine_options = ["LangGraph agent", "Classic agent"] if _lg_ok else ["Classic agent"]
+        engine_label = st.radio(
+            "Execution engine",
+            engine_options,
+            captions=(["Role-based StateGraph (safety→intent→data→evidence→answer→grounding).",
+                       "The original procedural agent."][: len(engine_options)]),
         )
-        tool_backend = TOOL_BACKEND_LABELS[backend_label]
-        if tool_backend == "mcp_remote":
-            st.caption(
-                "Start `python src/server_mcp.py` first. If unreachable, the agent "
-                "falls back to the local backend with a warning."
-            )
+        phase3_engine = "langgraph" if engine_label.startswith("LangGraph") else "classic"
+        if not _lg_ok:
+            st.caption("Install `langgraph` to enable the LangGraph engine (`pip install langgraph`).")
+        _mem_now = st.session_state.get("phase3_memory", {})
+        st.caption("Session memory: " + (
+            ", ".join(f"{k.replace('last_', '')}={v}" for k, v in _mem_now.items()) if _mem_now else "empty"))
+        if st.button("Clear Phase 3 memory"):
+            st.session_state["phase3_memory"] = {}
+            st.rerun()
 
-st.sidebar.markdown("### Suggested questions")
+# Suggested questions, grouped by category.
+st.sidebar.markdown("### Question examples")
 suggested_options = (
-    [("Custom — keep my own question", None)]
+    [("Custom — keep my own question", None),
+     ("Phase 3 · Overview — What variables are available?", "What variables are available?"),
+     ("Phase 3 · Summary — lactate (75-84, 24h)", "Summarize lactate for patients aged 75-84 in the first 24h."),
+     ("Phase 3 · Memory — What about creatinine?", "What about creatinine?"),
+     ("Phase 3 · Comparison — creatinine by age (24h)", "Compare creatinine across age groups in first_24h."),
+     ("Phase 3 · Comparison — MAP by time window (75-84)", "Compare MAP across time windows for patients aged 75-84."),
+     ("Phase 3 · Safety — treatment request (refused)", "Should this patient receive treatment for high lactate?")]
     + [(f"Patient · {q}", q) for q in PATIENT_QUESTIONS]
     + [(f"Concept · {q}", q) for q in CONCEPT_QUESTIONS]
     + [(f"Calculator · {q}", q) for q in CALCULATOR_QUESTIONS]
@@ -293,40 +314,64 @@ chosen_question = suggested_map[chosen_label]
 if chosen_question:
     st.session_state.question = chosen_question
 
-st.sidebar.markdown("### Retrieval controls")
-st.sidebar.caption("These shape retrieval only — they do not change tool calculations.")
-top_k = st.sidebar.slider("Top-k chunks", min_value=3, max_value=10, value=5, step=1)
-source_type_filter = st.sidebar.selectbox(
-    "Source type",
-    ["All", "mimic_stats", "project_report", "documentation", "article", "guideline"],
-)
-vital_sign_filter = st.sidebar.selectbox(
-    "Vital sign",
-    ["All", "Heart Rate", "Respiratory Rate", "MAP", "Systolic Blood Pressure", "Diastolic Blood Pressure", "Temperature", "SpO2"],
-)
-age_group_filter = st.sidebar.selectbox("Age group", ["All", "65-74", "75-84", "85+"])
-time_window_filter = st.sidebar.selectbox("Time window", ["All", "first_6h", "first_12h", "first_24h"])
+# Advanced settings (closed by default): backend, display, top-k, raw trace, Phase 1 filters.
+TOOL_BACKEND_LABELS = {"Local backend": "local", "MCP remote backend": "mcp_remote"}
+tool_backend = "local"
+source_type_filter = vital_sign_filter = age_group_filter = time_window_filter = "All"
+with st.sidebar.expander("Advanced settings", expanded=False):
+    demo_friendly = st.toggle(
+        "Demo-friendly display", value=True,
+        help="ON: cards and short tables, raw JSON tucked away. OFF: more technical detail.",
+    )
+    raw_trace = st.toggle(
+        "Raw trace display", value=False,
+        help="Expand raw tool input/output by default in the technical trace.",
+    )
+    top_k = st.slider("Top-k chunks (retrieval)", min_value=3, max_value=10, value=5, step=1)
+    if uses_agent:
+        backend_label = st.radio(
+            "Tool execution backend",
+            list(TOOL_BACKEND_LABELS),
+            captions=["Runs tools in-process. Stable default.",
+                      "Calls the same tools over a real MCP HTTP server."],
+        )
+        tool_backend = TOOL_BACKEND_LABELS[backend_label]
+        if tool_backend == "mcp_remote":
+            st.caption("Start `python src/server_mcp.py` first; falls back to local if unreachable.")
+    if is_phase1:
+        st.caption("Phase 1 retrieval filters")
+        source_type_filter = st.selectbox(
+            "Source type", ["All", "mimic_stats", "project_report", "documentation", "article", "guideline"])
+        vital_sign_filter = st.selectbox(
+            "Vital sign", ["All", "Heart Rate", "Respiratory Rate", "MAP", "Systolic Blood Pressure",
+                           "Diastolic Blood Pressure", "Temperature", "SpO2"])
+        age_group_filter = st.selectbox("Age group", ["All", "65-74", "75-84", "85+"])
+        time_window_filter = st.selectbox("Time window", ["All", "first_6h", "first_12h", "first_24h"])
 
 run_col, reset_col = st.sidebar.columns(2)
 ask_clicked = run_col.button(
-    "Run agent" if is_phase2 else "Run retrieval", type="primary", use_container_width=True
+    "Run agent" if uses_agent else "Run retrieval", type="primary", use_container_width=True
 )
 reset_clicked = reset_col.button("Reset", use_container_width=True)
 if reset_clicked:
     st.session_state.question = SAMPLE_QUESTIONS[0]
     st.rerun()
 
-st.sidebar.markdown("### Technical status")
-for label, (ok, detail) in _system_status().items():
-    icon = "✅" if ok else "⚠️"
-    st.sidebar.markdown(f"{icon} **{label}** — <span class='small-muted'>{detail}</span>", unsafe_allow_html=True)
+with st.sidebar.expander("Technical status", expanded=False):
+    for label, (ok, detail) in _system_status().items():
+        icon = "✅" if ok else "⚠️"
+        st.markdown(f"{icon} **{label}** — <span class='small-muted'>{detail}</span>", unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
 # Hero / summary banner
 # --------------------------------------------------------------------------- #
 
-mode_badge = "Phase 2 — Agentic RAG" if is_phase2 else "Phase 1 — Semantic RAG"
+mode_badge = {
+    PHASE_1: "Phase 1 — Semantic RAG",
+    PHASE_2: "Phase 2 — Agentic RAG",
+    PHASE_3: "Phase 3 — ICU Multi-Data Explorer",
+}[mode]
 st.markdown(
     f"""
     <div class="hero">
@@ -360,7 +405,7 @@ st.session_state.question = question
 # Phase 1 — Semantic RAG
 # --------------------------------------------------------------------------- #
 
-if ask_clicked and not is_phase2:
+if ask_clicked and is_phase1:
     with st.spinner("Retrieving local chunks..."):
         try:
             retrieved = retrieve_semantic_chunks(
@@ -653,6 +698,210 @@ elif ask_clicked and is_phase2:
         "while tools perform data availability checks, threshold comparisons and percentile comparisons. "
         "The final answer is grounded and auditable through the tool trace."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — ICU Multi-Data Explorer (same agent, multi-variable tools)
+# --------------------------------------------------------------------------- #
+
+elif ask_clicked and is_phase3:
+    # Controlled, session-only memory: rewrite simple follow-ups ("What about creatinine?").
+    phase3_memory = st.session_state.setdefault("phase3_memory", {})
+    effective_question, resolved_context = resolve_followup_question(question, phase3_memory)
+    if resolved_context:
+        ctx_bits = ", ".join(
+            f"{k}={resolved_context.get(k)}" for k in ("variable", "age_group", "time_window", "metric")
+            if resolved_context.get(k))
+        st.info(f"Using session context: {ctx_bits}")
+        st.caption(f"Interpreted as: {effective_question}")
+
+    with st.spinner("Running the ICU Multi-Data agent (deterministic tools + grounded LLM)..."):
+        if phase3_engine == "langgraph":
+            try:
+                agent_result = run_phase3_graph_agent(
+                    effective_question, tool_backend=tool_backend, memory_context=phase3_memory)
+            except Exception as exc:  # noqa: BLE001 - never crash the UI
+                st.warning(f"LangGraph engine failed ({exc}); falling back to the classic agent.")
+                agent_result = run_agent(effective_question, top_k=top_k, tool_backend=tool_backend)
+        else:
+            agent_result = run_agent(effective_question, top_k=top_k, tool_backend=tool_backend)
+
+    # Update the session memory from this answer (Phase 3 data answers only).
+    st.session_state["phase3_memory"] = update_phase3_memory(phase3_memory, agent_result)
+
+    engine_used = agent_result.get("engine", "classic")
+    nodes_executed = agent_result.get("nodes_executed", []) or []
+    trace = agent_result.get("tool_trace", [])
+    warnings = agent_result.get("warnings", [])
+    trace_by_name = {entry.get("tool_name"): entry for entry in trace}
+    qtype = str(agent_result.get("question_type", ""))
+    evidence_card = agent_result.get("evidence_card")
+    grounding = agent_result.get("grounding_validation")
+    tools_called = agent_result.get("tools_called", [])
+
+    def _p3_output(name: str):
+        entry = trace_by_name.get(name)
+        if entry is not None and entry.get("status") == "success":
+            return entry.get("outputs")
+        return None
+
+    # ===================================================================== #
+    # TIER 1 — main result (always visible): question, answer, quick summary
+    # ===================================================================== #
+    st.caption(f"Question: {question}")
+    if resolved_context:
+        ctx_bits = ", ".join(
+            f"{k}={resolved_context.get(k)}" for k in ("variable", "age_group", "time_window", "metric")
+            if resolved_context.get(k))
+        st.info(f"Using session context: {ctx_bits}  ·  interpreted as: {effective_question}")
+
+    st.markdown("## Answer")
+    if qtype == "clinical_advice_refused":
+        st.error("Clinical-advice request refused — this tool is descriptive and non-clinical only.")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(_strip_warning(agent_result.get("answer", "")))
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.caption(f"ℹ️ {NON_CLINICAL_WARNING}")
+    st.caption("The LLM reformulates; deterministic tools compute the values.")
+
+    grounded_ok = bool(grounding.get("is_grounded")) if isinstance(grounding, dict) else None
+    s_cols = st.columns(5)
+    s_cols[0].metric("Engine", str(engine_used))
+    s_cols[1].metric("Tool backend", str(agent_result.get("tool_backend", "local")))
+    s_cols[2].metric("Tools called", len(tools_called))
+    s_cols[3].metric("Tool success", f"{agent_result.get('tool_call_success_rate', 0.0) * 100:.0f}%")
+    s_cols[4].metric("Grounding", "OK" if grounded_ok else ("warning" if grounded_ok is False else "—"))
+
+    # Surface only non-grounding, non-fallback warnings here (grounding lives in Tier 3).
+    for warning in warnings:
+        if "Numeric grounding" in warning:
+            continue
+        st.warning(warning)
+
+    # ===================================================================== #
+    # TIER 2 — evidence summary (visible): the key sourced facts + charts
+    # ===================================================================== #
+    st.markdown("## Evidence summary")
+    st.caption("Only the key, sourced facts behind the answer.")
+
+    if qtype == "clinical_advice_refused":
+        st.markdown(
+            "- **Safety Agent** executed → request refused.\n"
+            "- **No data tool** was called.\n"
+            "- Descriptive, non-clinical academic tool only."
+        )
+
+    if isinstance(evidence_card, dict) and not evidence_card.get("error"):
+        _kv_table([
+            ("Variable", evidence_card.get("variable")),
+            ("Category", evidence_card.get("category")),
+            ("Unit", evidence_card.get("unit")),
+            ("Age group", evidence_card.get("age_group")),
+            ("Time window", evidence_card.get("time_window")),
+            ("N patients", evidence_card.get("n_patients")),
+            ("N measurements", evidence_card.get("n_measurements")),
+            ("Main metric", evidence_card.get("main_metric")),
+            ("Source table", evidence_card.get("source_table")),
+        ])
+
+    vsum = _p3_output("get_variable_summary")
+    if vsum and not vsum.get("error"):
+        st.markdown("**Distribution**")
+        st.dataframe(pd.DataFrame([{
+            "mean": vsum.get("mean"), "std": vsum.get("std"), "median": vsum.get("median"),
+            "p05": vsum.get("p05"), "p25": vsum.get("p25"), "p75": vsum.get("p75"),
+            "p90": vsum.get("p90"), "p95": vsum.get("p95"), "missing_rate": vsum.get("missing_rate"),
+        }]), width="stretch", hide_index=True)
+
+    cag = _p3_output("compare_age_groups")
+    if cag and not cag.get("error"):
+        st.markdown("**Comparison across age groups**")
+        metric_name = cag.get("metric", "value")
+        chart_df = pd.DataFrame(
+            [{"age_group": k, metric_name: v} for k, v in cag.get("values_by_age_group", {}).items() if v is not None])
+        if not chart_df.empty:
+            chart_col, table_col = st.columns([2, 1])
+            chart_col.bar_chart(chart_df.set_index("age_group"))
+            table_col.dataframe(chart_df, width="stretch", hide_index=True)
+        st.caption(cag.get("descriptive", ""))
+
+    ctw = _p3_output("compare_time_windows")
+    if ctw and not ctw.get("error"):
+        st.markdown("**Comparison across time windows**")
+        metric_name = ctw.get("metric", "value")
+        chart_df = pd.DataFrame(
+            [{"time_window": k, metric_name: v} for k, v in ctw.get("values_by_time_window", {}).items() if v is not None])
+        if not chart_df.empty:
+            chart_col, table_col = st.columns([2, 1])
+            chart_col.bar_chart(chart_df.set_index("time_window"))
+            table_col.dataframe(chart_df, width="stretch", hide_index=True)
+        st.caption(f"Trend: {ctw.get('trend')} — {ctw.get('descriptive', '')}")
+
+    avail = _p3_output("list_available_variables")
+    if avail and avail.get("variables"):
+        st.caption(f"{avail.get('count', 0)} ICU variables available.")
+        st.dataframe(pd.DataFrame(avail["variables"]), width="stretch", hide_index=True)
+
+    cohort = _p3_output("query_cohort_statistics")
+    if cohort and cohort.get("rows"):
+        st.dataframe(pd.DataFrame(cohort["rows"]), width="stretch", hide_index=True)
+
+    # ===================================================================== #
+    # TIER 3 — advanced details (hidden in an expander with tabs)
+    # ===================================================================== #
+    with st.expander("Advanced details — workflow · grounding · trace · raw", expanded=False):
+        tab_wf, tab_gr, tab_tr, tab_raw = st.tabs(
+            ["What the agent did", "Why grounded", "Technical trace", "Raw result"])
+
+        with tab_wf:
+            st.caption("Role-based decomposition as LangGraph nodes — not an autonomous multi-agent debate.")
+            if nodes_executed:
+                st.dataframe(pd.DataFrame({"Order": range(1, len(nodes_executed) + 1),
+                                           "Role node": nodes_executed}), width="stretch", hide_index=True)
+            else:
+                st.caption("Classic engine: procedural routing (safety → intent → tools → evidence → "
+                           "grounding → answer).")
+
+        with tab_gr:
+            st.caption("Grounding validator checks that numbers in the answer come from tool outputs.")
+            if isinstance(grounding, dict):
+                if grounding.get("is_grounded"):
+                    st.success("All numbers in the answer are supported by the tool outputs.")
+                else:
+                    st.warning("Unsupported numbers: "
+                               f"{', '.join(grounding.get('numbers_unsupported', [])) or '—'}")
+                _kv_table([
+                    ("Grounded", grounding.get("is_grounded")),
+                    ("Numbers in answer", ", ".join(grounding.get("numbers_in_answer", [])) or "—"),
+                    ("Supported", ", ".join(grounding.get("numbers_supported", [])) or "—"),
+                    ("Unsupported", ", ".join(grounding.get("numbers_unsupported", [])) or "—"),
+                ])
+            else:
+                st.caption("No numeric grounding applies to this question.")
+
+        with tab_tr:
+            st.caption("Every tool call is deterministic and recorded in the audit trace.")
+            if trace:
+                st.dataframe(pd.DataFrame([
+                    {"Step": e.get("step"), "Tool": e.get("tool_name"), "Backend": e.get("backend", "local"),
+                     "Status": e.get("status"), "ms": e.get("latency_ms"),
+                     "Input": _short(e.get("inputs", {})), "Output": _short(e.get("outputs_summary", ""))}
+                    for e in trace]), width="stretch", hide_index=True)
+                for e in trace:
+                    with st.expander(f"Step {e.get('step')} — {e.get('tool_name')} — raw input/output",
+                                     expanded=raw_trace):
+                        st.markdown("**Input**")
+                        st.json(e.get("inputs", {}))
+                        st.markdown("**Output**")
+                        st.json(e.get("outputs", {}))
+            else:
+                st.caption("No tools were called for this question.")
+            if agent_result.get("trace_file"):
+                st.caption(f"Auditable trace saved to {agent_result['trace_file']}")
+            st.caption("Session memory stores only the last query context, not patient data.")
+
+        with tab_raw:
+            st.json(agent_result)
 
 
 # --------------------------------------------------------------------------- #

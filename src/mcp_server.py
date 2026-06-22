@@ -22,11 +22,19 @@ from typing import Any, Callable
 from .tools import (
     calculatrice_medicale,
     check_data_availability,
+    compare_age_groups,
+    compare_time_windows,
     compare_to_percentiles,
     compare_to_standard_threshold,
+    detect_clinical_advice_request,
     explain_threshold_type,
+    generate_evidence_card,
     generate_patient_interpretation_report,
+    get_variable_summary,
     get_vital_summary,
+    list_available_variables,
+    plot_variable_distribution,
+    query_cohort_statistics,
     retrieve_project_context,
 )
 
@@ -101,6 +109,65 @@ TOOL_SPECS: list[ToolSpec] = [
         "Use this for purely arithmetic questions instead of the RAG/MIMIC tools.",
         {"expression": "str"},
         calculatrice_medicale,
+    ),
+    # ---- Phase 3: multi-variable ICU feature tools (icu_feature_summary.csv) ---- #
+    ToolSpec(
+        "list_available_variables",
+        "List the ICU variables available in the feature summary (labs + charted), with "
+        "category, unit, source_table, itemids, and available age groups / time windows.",
+        {"variable_category": "str|null (lab|vital_sign|all)"},
+        list_available_variables,
+    ),
+    ToolSpec(
+        "get_variable_summary",
+        "Return the exact descriptive statistics (n_patients, n_measurements, mean, std, "
+        "median, p05..p95, missing_rate) for one variable / age group / time window.",
+        {"variable_name": "str", "age_group": "str", "time_window": "str"},
+        get_variable_summary,
+    ),
+    ToolSpec(
+        "query_cohort_statistics",
+        "Descriptive query on one variable with optional age_group/time_window and metric; "
+        "returns the filtered rows and a readable summary.",
+        {"variable_name": "str", "age_group": "str|null", "time_window": "str|null", "metric": "str|null"},
+        query_cohort_statistics,
+    ),
+    ToolSpec(
+        "compare_age_groups",
+        "Compare one variable across the 65-74/75-84/85+ age groups for a fixed time window "
+        "(descriptive: values, highest/lowest, spread).",
+        {"variable_name": "str", "time_window": "str", "metric": "str|null (default median)"},
+        compare_age_groups,
+    ),
+    ToolSpec(
+        "compare_time_windows",
+        "Compare one variable across first_6h/12h/24h for a fixed age group "
+        "(descriptive: values + trend; not a causal claim).",
+        {"variable_name": "str", "age_group": "str", "metric": "str|null (default median)"},
+        compare_time_windows,
+    ),
+    ToolSpec(
+        "generate_evidence_card",
+        "Assemble a structured, sourced, non-clinical evidence card (variable, source_table, "
+        "itemids, unit, age/window, counts, main metric, missing-rate warning).",
+        {"variable_name": "str", "age_group": "str|null", "time_window": "str|null",
+         "tool_name": "str|null", "main_metric": "str|null"},
+        generate_evidence_card,
+    ),
+    ToolSpec(
+        "plot_variable_distribution",
+        "Build a bar-chart payload (x/y) of an aggregate metric grouped by age_group or "
+        "time_window (no fabricated histogram). Optionally saves a PNG.",
+        {"variable_name": "str", "metric": "str|null", "by": "str (age_group|time_window)",
+         "time_window": "str|null", "age_group": "str|null", "save_png": "bool"},
+        plot_variable_distribution,
+    ),
+    ToolSpec(
+        "detect_clinical_advice_request",
+        "Safety gate: deterministically flag diagnosis/treatment requests so the agent refuses "
+        "them non-clinically. Returns is_clinical_advice + refusal_message.",
+        {"question": "str"},
+        detect_clinical_advice_request,
     ),
 ]
 
